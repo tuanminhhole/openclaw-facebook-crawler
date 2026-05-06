@@ -2,7 +2,7 @@
   "id": "openclaw-facebook-crawler",
   "name": "Facebook Crawler",
   "description": "Tự động quét các group Facebook bán xe máy, lọc bài cá nhân (loại proseller/cò lái), kiểm tra vùng miền (HCM/ĐN/BD/LA/VT/TN), trích xuất SĐT và tổng hợp kết quả theo lịch cron.",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "enabledByDefault": true,
   "runtimeId": "openclaw-facebook-crawler",
   "capabilityTags": [
