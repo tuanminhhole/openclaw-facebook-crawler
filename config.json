@@ -1,12 +1,17 @@
-﻿{
-  "adminIds": [],
-  "notifyConversationId": "",
-  "notifyIsGroup": false,
+{
+  "adminIds": ["1447644752390476887"],
+  "notifyConversationId": "group:1792358243372634271",
+  "notifyIsGroup": true,
   "rules": {
-    "requireKeywords": ["keyword1", "keyword2"],
-    "blockKeywords": ["spam1", "spam2"],
+    "requireKeywords": ["bán", "thanh lý", "nhượng lại", "sang tên", "chính chủ", "cần bán", "pass", "sell", "rao bán", "đổi xe", "bán gấp", "bán lỗ", "giá bán"],
+    "blockKeywords": ["btc", "bao tranh chấp", "hỗ trợ góp", "trả góp", "góp tay đôi", "bao nợ xấu", "nậu xớ", "quẹt thẻ tín dụng", "cửa hàng", "salon", "giao xe tận nơi", "thu cũ đổi mới", "hỗ trợ vay", "ngân hàng hỗ trợ"],
     "locations": {
-      "region1": ["city1", "city2"]
+      "hcm": ["hcm", "hồ chí minh", "sài gòn", "tp.hcm", "tphcm", "quận 1", "quận 2", "quận 3", "quận 4", "quận 5", "quận 6", "quận 7", "quận 8", "quận 9", "quận 10", "quận 11", "quận 12", "gò vấp", "tân bình", "tân phú", "bình thạnh", "phú nhuận", "bình chánh", "hóc môn", "củ chi", "nhà bè", "cần giờ", "thủ đức", "q1", "q2", "q3", "q4", "q5", "q6", "q7", "q8", "q9", "q10", "q11", "q12"],
+      "dongnai": ["đồng nai", "biên hòa", "trảng bom", "long thành", "nhơn trạch", "định quán", "vĩnh cửu"],
+      "binhduong": ["bình dương", "dĩ an", "thuận an", "thủ dầu một", "bến cát", "tân uyên", "dầu tiếng"],
+      "longan": ["long an", "bến lức", "tân an", "đức hòa", "cần đước", "thủ thừa"],
+      "vungtau": ["vũng tàu", "brvt", "bà rịa", "phú mỹ", "xuyên mộc", "châu đức"],
+      "tayninh": ["tây ninh", "trảng bàng", "tân châu", "gò dầu", "dương minh châu"]
     },
     "extractRegex": {
       "phone": "(0[35789]\\d{8}|0[12]\\d{8})"
@@ -14,9 +19,30 @@
   },
   "cronSchedule": [
     { "id": "A", "cron": "0 7 * * *", "groupSlice": [0, 5] },
-    { "id": "B", "cron": "30 7 * * *", "groupSlice": [5, 10] }
+    { "id": "B", "cron": "30 7 * * *", "groupSlice": [5, 10] },
+    { "id": "C", "cron": "0 8 * * *", "groupSlice": [10, 15] },
+    { "id": "D", "cron": "0 12 * * *", "groupSlice": [0, 5] },
+    { "id": "E", "cron": "30 12 * * *", "groupSlice": [5, 10] },
+    { "id": "F", "cron": "0 13 * * *", "groupSlice": [10, 15] },
+    { "id": "G", "cron": "30 17 * * *", "groupSlice": [0, 5] },
+    { "id": "H", "cron": "0 18 * * *", "groupSlice": [5, 10] },
+    { "id": "I", "cron": "30 18 * * *", "groupSlice": [10, 15] }
   ],
   "groups": [
-    { "id": 1, "key": "example", "name": "Example Group", "url": "https://www.facebook.com/groups/example/" }
+    { "id": 1, "key": "nvx", "name": "Yamaha NVX", "url": "https://www.facebook.com/groups/nvxturbovietnam/" },
+    { "id": 2, "key": "nvx2", "name": "Yamaha NVX (2)", "url": "https://www.facebook.com/groups/yamaha.nvx.vietnam/" },
+    { "id": 3, "key": "pcx", "name": "Honda PCX", "url": "https://www.facebook.com/groups/hondapcx160/" },
+    { "id": 4, "key": "pcx2", "name": "Honda PCX (2)", "url": "https://www.facebook.com/groups/pcxvn/" },
+    { "id": 5, "key": "sh", "name": "Honda SH", "url": "https://www.facebook.com/groups/274724136360765/" },
+    { "id": 6, "key": "sh2", "name": "Honda SH (2)", "url": "https://www.facebook.com/groups/219155253658443/" },
+    { "id": 7, "key": "adv", "name": "Honda ADV 150/160", "url": "https://www.facebook.com/groups/719793245134962/" },
+    { "id": 8, "key": "adv350", "name": "Honda ADV 350", "url": "https://www.facebook.com/groups/955466911755345/" },
+    { "id": 9, "key": "xsr", "name": "Yamaha XSR 155", "url": "https://www.facebook.com/groups/799975023796599/" },
+    { "id": 10, "key": "pg1", "name": "Yamaha PG-1", "url": "https://www.facebook.com/groups/192726703901408/" },
+    { "id": 11, "key": "grande", "name": "Yamaha Grande", "url": "https://www.facebook.com/groups/yamahagrande/" },
+    { "id": 12, "key": "latte", "name": "Yamaha Latte", "url": "https://www.facebook.com/groups/529242537630827/" },
+    { "id": 13, "key": "mt15", "name": "Yamaha MT-15", "url": "https://www.facebook.com/groups/298221203886657/" },
+    { "id": 14, "key": "fz", "name": "Yamaha FZ150/155", "url": "https://www.facebook.com/groups/1319546468200845/" },
+    { "id": 15, "key": "vixion", "name": "Yamaha Vixion", "url": "https://www.facebook.com/groups/1823011504641211/" }
   ]
 }

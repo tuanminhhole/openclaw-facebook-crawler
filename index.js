@@ -143,6 +143,8 @@ async function runCrawlSession(sessionId, groupSlice, sendReport, api, groupsOve
 
       let rawPosts = [];
       for (let scroll = 0; scroll <= scrollDepth; scroll++) {
+        await btExec('evaluate "document.querySelectorAll(\'div[role=button]\').forEach(b => { if(b?.innerText?.includes(\'Xem thêm\')) b.click() })"');
+        await btExec('wait 1000');
         const out = await btExec('get_posts');
         try {
           const match = out.match(/\[[\s\S]*\]/);
@@ -157,9 +159,16 @@ async function runCrawlSession(sessionId, groupSlice, sendReport, api, groupsOve
         }
       }
 
-      rawPosts = rawPosts.filter(p => p.permalink && !scannedSet.has(p.permalink));
+      const uniquePosts = [];
+      const seenRaw = new Set();
+      for (const p of rawPosts) {
+        if (p.permalink && !scannedSet.has(p.permalink) && !seenRaw.has(p.permalink)) {
+          seenRaw.add(p.permalink);
+          uniquePosts.push(p);
+        }
+      }
 
-      for (const post of rawPosts) {
+      for (const post of uniquePosts) {
         const text = post.text || '';
         const link = post.permalink || '';
         const author = post.authorUrl || post.author || '';
@@ -171,6 +180,14 @@ async function runCrawlSession(sessionId, groupSlice, sendReport, api, groupsOve
         // Requirement check
         if (requireKeywords.length > 0 && !textContainsAny(text, requireKeywords)) {
           continue; // Missing required keywords
+        }
+
+        // Smart vehicle check (reject if it's just selling accessories)
+        const accessories = ['phuộc', 'baga', 'pô', 'nhông sên', 'mâm', 'lốp', 'vỏ xe', 'đèn', 'mũ bảo hiểm', 'tem', 'kính hậu'];
+        const accCount = accessories.filter(a => text.toLowerCase().includes(a)).length;
+        if (accCount >= 2 && !text.toLowerCase().includes('nguyên xe') && !text.toLowerCase().includes('cả xe')) {
+           skippedPro++; 
+           continue; 
         }
 
         // Block check
@@ -233,11 +250,12 @@ async function runCrawlSession(sessionId, groupSlice, sendReport, api, groupsOve
   saveState(state);
 
   const isLastSession = ['C', 'F', 'I'].includes(sessionId); // Assuming default 9 session structure
-  const report = isLastSession
-    ? buildDailyReport(foundItems)
-    : `🔍 *Session ${sessionId} hoàn tất*\n✅ Tìm được: ${foundTotal} bài\n🚫 Bị block: ${skippedPro}\n📍 Sai vùng: ${skippedLoc}`;
+  let reportStr = `🔍 *Session ${sessionId} hoàn tất*\n✅ Tìm được: ${foundTotal} bài\n🚫 Bị block/Sai mục đích: ${skippedPro}\n📍 Sai vùng: ${skippedLoc}`;
+  if (isLastSession || sessionId === 'MANUAL') {
+    reportStr = buildDailyReport(foundItems) + `\n\n` + reportStr;
+  }
 
-  if (sendReport) await sendReport(report);
+  if (sendReport) await sendReport(reportStr);
 }
 
 function buildDailyReport(items) {
