@@ -2,6 +2,10 @@ import { definePluginEntry } from 'openclaw/plugin-sdk/plugin-entry';
 import fs from 'fs';
 import path from 'path';
 import { fileURLToPath, pathToFileURL } from 'url';
+import { exec } from 'child_process';
+import { promisify } from 'util';
+
+const execAsync = promisify(exec);
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -90,7 +94,7 @@ function extractRegexFields(text, regexObj) {
 }
 
 // ─── Core crawl logic ─────────────────────────────────────────────────────────
-async function runCrawlSession(sessionId, groupSlice, sendReport, api) {
+async function runCrawlSession(sessionId, groupSlice, sendReport, api, groupsOverride = null) {
   const cfg   = loadConfig();
   const state = loadState();
   const bl    = loadBlacklist();
@@ -101,7 +105,7 @@ async function runCrawlSession(sessionId, groupSlice, sendReport, api) {
   const locationsObj = rules.locations || {};
   const extractRegexObj = rules.extractRegex || {};
 
-  const groups = cfg.groups.slice(groupSlice[0], groupSlice[1]);
+  const groups = groupsOverride || (groupSlice ? cfg.groups.slice(groupSlice[0], groupSlice[1]) : cfg.groups);
   if (groups.length === 0) {
     console.log(`[fb-crawler] Session ${sessionId}: No groups to scan in this slice.`);
     return;
@@ -119,14 +123,12 @@ async function runCrawlSession(sessionId, groupSlice, sendReport, api) {
 
   async function btExec(cmd) {
     try {
-      if (api?.exec) {
-        const r = await api.exec(`node ~/browser-tool.js ${cmd}`);
-        return r?.output || r?.stdout || '';
-      }
+      const { stdout } = await execAsync(`node /root/project/.openclaw/workspace-bot/browser-tool.js ${cmd}`);
+      return stdout || '';
     } catch(e) {
-      console.error('[fb-crawler] btExec err:', e);
+      console.error('[fb-crawler] btExec err:', e.message);
+      return '';
     }
-    return '';
   }
 
   let foundTotal = 0, skippedPro = 0, skippedLoc = 0;
@@ -441,9 +443,7 @@ const plugin = definePluginEntry({
             return { handled: true };
           }
           await reply(`🔍 Đang quét group: ${g.name}...`);
-          const tempCfg = { ...notifyCfg, groups: [g] };
-          writeJson(CONFIG_FILE + '.tmp', tempCfg);
-          runCrawlSession('MANUAL', [0, 1], reportTo, api).catch(console.error);
+          runCrawlSession('MANUAL', null, reportTo, api, [g]).catch(console.error);
           return { handled: true };
         }
 
