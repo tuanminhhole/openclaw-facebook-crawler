@@ -1,6 +1,6 @@
 {
   "name": "openclaw-facebook-crawler",
-  "version": "1.0.1",
+  "version": "1.0.2",
   "description": "Facebook group motorbike listing crawler — filters individual sellers, location-aware, cron-integrated",
   "main": "index.js",
   "author": "tuanminhhole",
