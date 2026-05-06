@@ -14,11 +14,12 @@ const openclawHome = path.resolve(__dirname, '..', '..');
 // ─── Paths ────────────────────────────────────────────────────────────────────
 const DATA_DIR     = path.join(__dirname, 'data');
 const RESULTS_DIR  = path.join(DATA_DIR, 'results');
+const RAW_DIR      = path.join(DATA_DIR, 'raw');
 const STATE_FILE   = path.join(DATA_DIR, 'state.json');
 const BLACK_FILE   = path.join(DATA_DIR, 'blacklist_uid.json');
 const CONFIG_FILE  = path.join(__dirname, 'config.json');
 
-for (const d of [DATA_DIR, RESULTS_DIR]) {
+for (const d of [DATA_DIR, RESULTS_DIR, RAW_DIR]) {
   if (!fs.existsSync(d)) fs.mkdirSync(d, { recursive: true });
 }
 
@@ -61,6 +62,33 @@ async function sendMsg(ctx, convId, isGroup, text) {
   const tid = String(convId).replace(/^group:/, '');
   await send(tid, String(text), { isGroup, profile: ctx?.accountId || 'default', textMode: 'markdown' });
 }
+
+// ─── Time helper: detect if a post time string is older than current month ─────
+function isOlderThanCurrentMonth(timeStr) {
+  if (!timeStr) return false;
+  const t = timeStr.toLowerCase().trim();
+  // "X tuần" — 5+ weeks = safely last month
+  const weekMatch = t.match(/(\d+)\s*tu[ầâ]n/);
+  if (weekMatch && parseInt(weekMatch[1]) >= 5) return true;
+  // "DD Tháng M" — explicit month
+  const dateMatch = t.match(/(\d+)\s*th[áa]ng\s*(\d+)/);
+  if (dateMatch) {
+    const postMonth = parseInt(dateMatch[2]);
+    const nowMonth  = new Date().getMonth() + 1;
+    const nowYear   = new Date().getFullYear();
+    // Simple: if postMonth < nowMonth (same year context) it's older
+    if (postMonth < nowMonth) return true;
+  }
+  return false;
+}
+
+// ─── Raw store helpers ────────────────────────────────────────────────────────
+function rawFile(groupKey) {
+  const ym = new Date().toISOString().slice(0, 7); // YYYY-MM
+  return path.join(RAW_DIR, `${groupKey}-${ym}.json`);
+}
+function loadRaw(groupKey) { return readJson(rawFile(groupKey), []); }
+function saveRaw(groupKey, posts) { writeJson(rawFile(groupKey), posts); }
 
 // ─── Dynamic Rules Evaluator ──────────────────────────────────────────────────
 function textContainsAny(text, keywords) {
@@ -112,13 +140,14 @@ async function runCrawlSession(sessionId, groupSlice, sendReport, api, groupsOve
   }
   const scannedSet = new Set(state.scanned || []);
 
-  let scrollDepth = 2;
+  // scrollDepth: when lastRun is set, scroll based on gap; first-run scans deep to cover full month
+  let maxScroll = 10;
   if (state.lastRun) {
     const diffMin = (Date.now() - new Date(state.lastRun).getTime()) / 60000;
-    if (diffMin < 30) scrollDepth = 1;
-    else if (diffMin < 240) scrollDepth = 2;
-    else if (diffMin < 720) scrollDepth = 4;
-    else scrollDepth = 6;
+    if (diffMin < 30) maxScroll = 2;
+    else if (diffMin < 240) maxScroll = 4;
+    else if (diffMin < 720) maxScroll = 6;
+    else maxScroll = 10;
   }
 
   async function btExec(cmd) {
@@ -141,32 +170,52 @@ async function runCrawlSession(sessionId, groupSlice, sendReport, api, groupsOve
       await btExec(`open "${group.url}"`);
       await btExec('wait 4000');
 
-      let rawPosts = [];
-      for (let scroll = 0; scroll <= scrollDepth; scroll++) {
+      // ── PHASE 1: Collect raw posts until previous month ──────────────────
+      const existingRaw = loadRaw(group.key);
+      const existingRawSet = new Set(existingRaw.map(p => p.permalink));
+      let allPagePosts = [];
+      let reachedOldPosts = false;
+      for (let scroll = 0; scroll <= maxScroll && !reachedOldPosts; scroll++) {
         await btExec('evaluate "document.querySelectorAll(\'div[role=button]\').forEach(b => { if(b?.innerText?.includes(\'Xem thêm\')) b.click() })"');
-        await btExec('wait 1000');
+        await btExec('wait 1200');
         const out = await btExec('get_posts');
         try {
           const match = out.match(/\[[\s\S]*\]/);
           if (match) {
             const parsed = JSON.parse(match[0]);
-            rawPosts.push(...parsed);
+            allPagePosts.push(...parsed);
+            // Stop if ANY post in this batch is older than current month
+            if (parsed.some(p => isOlderThanCurrentMonth(p.time))) {
+              reachedOldPosts = true;
+              console.log(`[fb-crawler] ${group.key}: reached end of current month at scroll ${scroll}`);
+            }
           }
         } catch {}
-        if (scroll < scrollDepth) {
+        if (scroll < maxScroll && !reachedOldPosts) {
           await btExec('scroll 2500');
           await btExec('wait 2500');
         }
       }
-
-      const uniquePosts = [];
-      const seenRaw = new Set();
-      for (const p of rawPosts) {
-        if (p.permalink && !scannedSet.has(p.permalink) && !seenRaw.has(p.permalink)) {
-          seenRaw.add(p.permalink);
-          uniquePosts.push(p);
+      // ── PHASE 2: Deduplicate within page and against raw store ───────────
+      const seenOnPage = new Set();
+      const newRawPosts = [];
+      for (const p of allPagePosts) {
+        if (!p.permalink || seenOnPage.has(p.permalink)) continue;
+        seenOnPage.add(p.permalink);
+        if (!existingRawSet.has(p.permalink)) {
+          newRawPosts.push({ permalink: p.permalink, text: p.text, author: p.author, authorUrl: p.authorUrl, time: p.time, scannedAt: new Date().toISOString() });
+          existingRaw.push({ permalink: p.permalink, text: p.text, author: p.author, authorUrl: p.authorUrl, time: p.time, scannedAt: new Date().toISOString() });
         }
       }
+      saveRaw(group.key, existingRaw);
+      console.log(`[fb-crawler] ${group.key}: ${newRawPosts.length} new raw posts (${existingRaw.length} total in store)`);
+      let rawPosts = allPagePosts; // keep for compatibility
+
+      // ── PHASE 3: Filter only NEW posts (not in global scannedSet) ─────────
+      const uniquePosts = newRawPosts.map(r => ({
+        text: r.text, permalink: r.permalink, author: r.author,
+        authorUrl: r.authorUrl, time: r.time
+      }));
 
       for (const post of uniquePosts) {
         const text = post.text || '';
@@ -177,9 +226,15 @@ async function runCrawlSession(sessionId, groupSlice, sendReport, api, groupsOve
 
         if (author && bl.uids.includes(author)) continue;
 
-        // Requirement check
+        // Requirement check: must have sale keywords
         if (requireKeywords.length > 0 && !textContainsAny(text, requireKeywords)) {
-          continue; // Missing required keywords
+          continue;
+        }
+
+        // Vehicle keyword check for mixed groups
+        const vehicleKws = group.vehicleKeywords || [];
+        if (vehicleKws.length > 0 && !textContainsAny(text, vehicleKws)) {
+          continue; // Post doesn't mention any of the target vehicle models
         }
 
         // Smart vehicle check (reject if it's just selling accessories)
@@ -249,7 +304,7 @@ async function runCrawlSession(sessionId, groupSlice, sendReport, api, groupsOve
   state.scanned = [...scannedSet].slice(-5000); // cap at 5000
   saveState(state);
 
-  const isLastSession = ['C', 'F', 'I'].includes(sessionId); // Assuming default 9 session structure
+  const isLastSession = ['E', 'J', 'O', 'MANUAL'].includes(sessionId);
   let reportStr = `🔍 *Session ${sessionId} hoàn tất*\n✅ Tìm được: ${foundTotal} bài\n🚫 Bị block/Sai mục đích: ${skippedPro}\n📍 Sai vùng: ${skippedLoc}`;
   if (isLastSession || sessionId === 'MANUAL') {
     reportStr = buildDailyReport(foundItems) + `\n\n` + reportStr;
