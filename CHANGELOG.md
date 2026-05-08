@@ -2,7 +2,12 @@
 
 All notable changes to this project will be documented in this file.
 
-## [1.0.6] - 2026-05-08
+## [1.0.7] - 2026-05-08
+
+### Fixed
+- Bumped version to resolve ClawHub duplicate version conflict on publish.
+
+
 
 ### Added
 - AI classifier pipeline (`analyzePostAI`) via internal LLM gateway — replaces keyword-only filtering for `banxe` profile.
