@@ -2,6 +2,8 @@ import { definePluginEntry } from 'openclaw/plugin-sdk/plugin-entry';
 import fs from 'fs';
 import path from 'path';
 import { fileURLToPath, pathToFileURL } from 'url';
+import https from 'https';
+import http from 'http';
 import { exec } from 'child_process';
 import { promisify } from 'util';
 
@@ -15,11 +17,12 @@ const openclawHome = path.resolve(__dirname, '..', '..');
 const DATA_DIR     = path.join(__dirname, 'data');
 const RESULTS_DIR  = path.join(DATA_DIR, 'results');
 const RAW_DIR      = path.join(DATA_DIR, 'raw');
+const CONTENT_DIR  = path.join(DATA_DIR, 'content');
 const STATE_FILE   = path.join(DATA_DIR, 'state.json');
 const BLACK_FILE   = path.join(DATA_DIR, 'blacklist_uid.json');
 const CONFIG_FILE  = path.join(__dirname, 'config.json');
 
-for (const d of [DATA_DIR, RESULTS_DIR, RAW_DIR]) {
+for (const d of [DATA_DIR, RESULTS_DIR, RAW_DIR, CONTENT_DIR]) {
   if (!fs.existsSync(d)) fs.mkdirSync(d, { recursive: true });
 }
 
@@ -31,17 +34,37 @@ function writeJson(file, data) {
   fs.writeFileSync(file, JSON.stringify(data, null, 2));
 }
 
-function loadConfig()    { return readJson(CONFIG_FILE, { adminIds: [], groups: [], rules: {}, cronSchedule: [] }); }
+function downloadImage(url, dest) {
+  return new Promise((resolve, reject) => {
+    const client = url.startsWith('https') ? https : http;
+    client.get(url, (res) => {
+      if (res.statusCode !== 200) {
+        return reject(new Error(`Failed to download image: ${res.statusCode}`));
+      }
+      const file = fs.createWriteStream(dest);
+      res.pipe(file);
+      file.on('finish', () => {
+        file.close();
+        resolve(dest);
+      });
+    }).on('error', (err) => {
+      fs.unlink(dest, () => {});
+      reject(err);
+    });
+  });
+}
+
+function loadConfig()    { return readJson(CONFIG_FILE, { adminIds: [], profiles: {} }); }
 function saveConfig(cfg) { writeJson(CONFIG_FILE, cfg); }
-function loadState()     { return readJson(STATE_FILE, { lastRun: null, scanned: [], authorPostCount: {} }); }
-function saveState(s)    { writeJson(STATE_FILE, s); }
-function loadBlacklist() { return readJson(BLACK_FILE, { uids: [] }); }
-function saveBlacklist(b){ writeJson(BLACK_FILE, b); }
+function loadState(profile)     { return readJson(path.join(DATA_DIR, `state_${profile}.json`), { lastRun: null, scanned: [], authorPostCount: {} }); }
+function saveState(profile, s)    { writeJson(path.join(DATA_DIR, `state_${profile}.json`), s); }
+function loadBlacklist(profile) { return readJson(path.join(DATA_DIR, `blacklist_${profile}.json`), { uids: [] }); }
+function saveBlacklist(profile, b){ writeJson(path.join(DATA_DIR, `blacklist_${profile}.json`), b); }
 
 function todayKey() { return new Date().toISOString().slice(0, 10); }
-function resultsFile() { return path.join(RESULTS_DIR, `${todayKey()}.json`); }
-function appendResult(item) {
-  const file = resultsFile();
+function resultsFile(profile) { return path.join(RESULTS_DIR, `${profile}_${todayKey()}.json`); }
+function appendResult(profile, item) {
+  const file = resultsFile(profile);
   const list = readJson(file, []);
   list.push(item);
   writeJson(file, list);
@@ -83,12 +106,12 @@ function isOlderThanCurrentMonth(timeStr) {
 }
 
 // ─── Raw store helpers ────────────────────────────────────────────────────────
-function rawFile(groupKey) {
+function rawFile(profile, groupKey) {
   const ym = new Date().toISOString().slice(0, 7); // YYYY-MM
-  return path.join(RAW_DIR, `${groupKey}-${ym}.json`);
+  return path.join(RAW_DIR, `${profile}_${groupKey}-${ym}.json`);
 }
-function loadRaw(groupKey) { return readJson(rawFile(groupKey), []); }
-function saveRaw(groupKey, posts) { writeJson(rawFile(groupKey), posts); }
+function loadRaw(profile, groupKey) { return readJson(rawFile(profile, groupKey), []); }
+function saveRaw(profile, groupKey, posts) { writeJson(rawFile(profile, groupKey), posts); }
 
 // ─── Dynamic Rules Evaluator ──────────────────────────────────────────────────
 function textContainsAny(text, keywords) {
@@ -121,11 +144,81 @@ function extractRegexFields(text, regexObj) {
   return extracted;
 }
 
+// ─── AI Classifier ────────────────────────────────────────────────────────────
+async function analyzePostAI(text) {
+  try {
+    const res = await fetch('http://9router:20128/v1/chat/completions', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer sk-no-key' },
+      body: JSON.stringify({
+        model: 'smart-route',
+        messages: [
+          {
+            role: 'system',
+            content: `Bạn là AI kiểm duyệt bài đăng bán xe máy. Nhiệm vụ của bạn là đọc bài viết và xác định đây có phải bài "Cá nhân đăng bán thanh lý xe máy" HỢP LỆ không.
+HỢP LỆ (trả về YES):
+- Cá nhân rao bán chiếc xe máy nguyên chiếc của họ (thanh lý, pass lại, kẹt tiền bán...).
+
+KHÔNG HỢP LỆ (trả về NO):
+- Bài bán mắt kính, bất động sản, quần áo, dịch vụ hớt tóc, v.v.
+- Hỏi đáp, thảo luận, khoe xe (ví dụ: "thay phuộc loại nào", "xe đẹp quá").
+- Mua bán phụ tùng, đồ chơi xe (mâm, lốp, phuộc, chuông nồi...).
+- Bài đăng tìm mua xe.
+- Cửa hàng (salon) chuyên nghiệp bán nhiều xe, hỗ trợ trả góp, bao nợ xấu.
+
+LƯU Ý: Nếu nghi ngờ, hãy ưu tiên trả về NO. CHỈ TRẢ LỜI ĐÚNG 1 TỪ: "YES" hoặc "NO".`
+          },
+          {
+            role: 'user',
+            content: 'Bài viết:\n' + text.substring(0, 1500)
+          }
+        ],
+        temperature: 0.1,
+        stream: false
+      }),
+      signal: AbortSignal.timeout(120000)
+    });
+    if (!res.ok) {
+      console.error('[fb-crawler] AI HTTP Error:', res.status);
+      return false; // Fail closed: reject if AI fails
+    }
+    
+    const resText = await res.text();
+    let data;
+    try {
+      data = JSON.parse(resText);
+    } catch (e) {
+      // If the proxy forces SSE (data: {...})
+      const lines = resText.split('\n').filter(l => l.startsWith('data: ') && !l.includes('[DONE]'));
+      if (lines.length > 0) {
+        // Just grab the first chunk's content or aggregate
+        let aggregated = '';
+        for (const line of lines) {
+           try {
+             const chunk = JSON.parse(line.substring(6));
+             aggregated += chunk.choices?.[0]?.delta?.content || chunk.choices?.[0]?.message?.content || '';
+           } catch(err) {}
+        }
+        return aggregated.toUpperCase().includes('YES');
+      }
+      throw new Error('Unparseable response: ' + resText.substring(0, 50));
+    }
+
+    const resultText = data.choices?.[0]?.message?.content?.trim().toUpperCase() || 'NO';
+    return resultText.includes('YES');
+  } catch (err) {
+    console.error('[fb-crawler] AI Network error:', err.message);
+    return false; // Fail closed
+  }
+}
+
+
 // ─── Core crawl logic ─────────────────────────────────────────────────────────
-async function runCrawlSession(sessionId, groupSlice, sendReport, api, groupsOverride = null) {
-  const cfg   = loadConfig();
-  const state = loadState();
-  const bl    = loadBlacklist();
+async function runCrawlSession(sessionId, groupSlice, sendReport, api, groupsOverride = null, profile = 'banxe') {
+  const allCfg = loadConfig();
+  const cfg   = allCfg.profiles?.[profile] || { rules: {}, groups: [] };
+  const state = loadState(profile);
+  const bl    = loadBlacklist(profile);
 
   const rules = cfg.rules || {};
   const requireKeywords = rules.requireKeywords || [];
@@ -133,9 +226,9 @@ async function runCrawlSession(sessionId, groupSlice, sendReport, api, groupsOve
   const locationsObj = rules.locations || {};
   const extractRegexObj = rules.extractRegex || {};
 
-  const groups = groupsOverride || (groupSlice ? cfg.groups.slice(groupSlice[0], groupSlice[1]) : cfg.groups);
+  const groups = groupsOverride || (groupSlice ? (cfg.groups || []).slice(groupSlice[0], groupSlice[1]) : (cfg.groups || []));
   if (groups.length === 0) {
-    console.log(`[fb-crawler] Session ${sessionId}: No groups to scan in this slice.`);
+    console.log(`[fb-crawler] Session ${sessionId} (${profile}): No groups to scan in this slice.`);
     return;
   }
   const scannedSet = new Set(state.scanned || []);
@@ -165,20 +258,26 @@ async function runCrawlSession(sessionId, groupSlice, sendReport, api, groupsOve
 
   for (const group of groups) {
     try {
-      console.log(`[fb-crawler] Session ${sessionId} → ${group.name}`);
+      console.log(`[fb-crawler] Session ${sessionId} (${profile}) → ${group.name}`);
 
       await btExec(`open "${group.url}"`);
       await btExec('wait 4000');
 
       // ── PHASE 1: Collect raw posts until previous month ──────────────────
-      const existingRaw = loadRaw(group.key);
+      const existingRaw = loadRaw(profile, group.key);
       const existingRawSet = new Set(existingRaw.map(p => p.permalink));
       let allPagePosts = [];
       let reachedOldPosts = false;
       for (let scroll = 0; scroll <= maxScroll && !reachedOldPosts; scroll++) {
+        // Close login popups if any
+        await btExec('evaluate "document.querySelectorAll(\'div[aria-label=\\\'Đóng\\\'], div[aria-label=\\\'Close\\\']\').forEach(b => b.click())"');
         await btExec('evaluate "document.querySelectorAll(\'div[role=button]\').forEach(b => { if(b?.innerText?.includes(\'Xem thêm\')) b.click() })"');
         await btExec('wait 1200');
         const out = await btExec('get_posts');
+        if (out.includes('Chrome Debug not running') || out.includes('socket hang up') || out.includes('Connection refused')) {
+          console.log('[fb-crawler] Chrome connection error detected!');
+          throw new Error('Không kết nối được với Chrome! Hãy đảm bảo bạn đã mở Chrome với cờ --remote-debugging-port=9222.');
+        }
         try {
           const match = out.match(/\[[\s\S]*\]/);
           if (match) {
@@ -198,24 +297,47 @@ async function runCrawlSession(sessionId, groupSlice, sendReport, api, groupsOve
       }
       // ── PHASE 2: Deduplicate within page and against raw store ───────────
       const seenOnPage = new Set();
+      // Cải tiến: Tránh trùng lặp do Facebook đổi định dạng URL (/posts/ vs /permalink/) hoặc trùng content
+      const existingTextHashes = new Set(existingRaw.map(p => (p.text || '').substring(0, 100).replace(/\s+/g, '').toLowerCase()));
+      
       const newRawPosts = [];
       for (const p of allPagePosts) {
         if (!p.permalink || seenOnPage.has(p.permalink)) continue;
-        seenOnPage.add(p.permalink);
-        if (!existingRawSet.has(p.permalink)) {
-          newRawPosts.push({ permalink: p.permalink, text: p.text, author: p.author, authorUrl: p.authorUrl, time: p.time, scannedAt: new Date().toISOString() });
-          existingRaw.push({ permalink: p.permalink, text: p.text, author: p.author, authorUrl: p.authorUrl, time: p.time, scannedAt: new Date().toISOString() });
+        
+        const textHash = (p.text || '').substring(0, 100).replace(/\s+/g, '').toLowerCase();
+        
+        // Extract post ID from permalink to catch /posts/123 vs /permalink/123
+        const idMatch = p.permalink.match(/(?:posts|permalink|story_fbid=|photos|videos|reel)\/?=?(\d+)/);
+        const postId = idMatch ? idMatch[1] : p.permalink;
+        
+        // Check if already in raw based on exact link, post ID string, or text content similarity
+        const isDuplicateLink = existingRawSet.has(p.permalink);
+        const isDuplicateId = existingRaw.some(r => r.permalink.includes(postId) && postId.length > 5);
+        const isDuplicateText = existingTextHashes.has(textHash) && textHash.length > 20;
+
+        if (!isDuplicateLink && !isDuplicateId && !isDuplicateText) {
+          seenOnPage.add(p.permalink);
+          existingTextHashes.add(textHash);
+          
+          const newEntry = { permalink: p.permalink, text: p.text, author: p.author, authorUrl: p.authorUrl, time: p.time, images: p.images || [], scannedAt: new Date().toISOString() };
+          newRawPosts.push(newEntry);
+          existingRaw.push(newEntry);
         }
       }
-      saveRaw(group.key, existingRaw);
+      saveRaw(profile, group.key, existingRaw);
       console.log(`[fb-crawler] ${group.key}: ${newRawPosts.length} new raw posts (${existingRaw.length} total in store)`);
       let rawPosts = allPagePosts; // keep for compatibility
 
       // ── PHASE 3: Filter only NEW posts (not in global scannedSet) ─────────
-      const uniquePosts = newRawPosts.map(r => ({
+      let uniquePosts = newRawPosts.map(r => ({
         text: r.text, permalink: r.permalink, author: r.author,
-        authorUrl: r.authorUrl, time: r.time
+        authorUrl: r.authorUrl, time: r.time, images: r.images
       }));
+      
+      const maxLimit = rules.maxPosts;
+      if (maxLimit && maxLimit > 0) {
+        uniquePosts = uniquePosts.slice(0, maxLimit);
+      }
 
       for (const post of uniquePosts) {
         const text = post.text || '';
@@ -226,30 +348,40 @@ async function runCrawlSession(sessionId, groupSlice, sendReport, api, groupsOve
 
         if (author && bl.uids.includes(author)) continue;
 
-        // Requirement check: must have sale keywords
-        if (requireKeywords.length > 0 && !textContainsAny(text, requireKeywords)) {
-          continue;
-        }
-
         // Vehicle keyword check for mixed groups
         const vehicleKws = group.vehicleKeywords || [];
         if (vehicleKws.length > 0 && !textContainsAny(text, vehicleKws)) {
           continue; // Post doesn't mention any of the target vehicle models
         }
 
-        // Smart vehicle check (reject if it's just selling accessories)
-        const accessories = ['phuộc', 'baga', 'pô', 'nhông sên', 'mâm', 'lốp', 'vỏ xe', 'đèn', 'mũ bảo hiểm', 'tem', 'kính hậu'];
-        const accCount = accessories.filter(a => text.toLowerCase().includes(a)).length;
-        if (accCount >= 2 && !text.toLowerCase().includes('nguyên xe') && !text.toLowerCase().includes('cả xe')) {
-           skippedPro++; 
-           continue; 
-        }
+        // For banxe profile, use AI to classify instead of strict keywords
+        if (profile === 'banxe') {
+          // Block check (still useful for hard blocks like "cửa hàng", "salon", "trả góp")
+          if (blockKeywords.length > 0 && textContainsAny(text, blockKeywords)) {
+            skippedPro++;
+            if (author) { bl.uids.push(author); saveBlacklist(profile, bl); }
+            continue;
+          }
 
-        // Block check
-        if (blockKeywords.length > 0 && textContainsAny(text, blockKeywords)) {
-          skippedPro++;
-          if (author) { bl.uids.push(author); saveBlacklist(bl); }
-          continue;
+          // Use AI to read and classify
+          const isPersonalSale = await analyzePostAI(text);
+          if (!isPersonalSale) {
+            skippedPro++;
+            continue;
+          }
+        } else {
+          // For other profiles (matkinh), keep keyword logic
+          // Requirement check
+          if (requireKeywords.length > 0 && !textContainsAny(text, requireKeywords)) {
+            continue;
+          }
+
+          // Block check
+          if (blockKeywords.length > 0 && textContainsAny(text, blockKeywords)) {
+            skippedPro++;
+            if (author) { bl.uids.push(author); saveBlacklist(profile, bl); }
+            continue;
+          }
         }
 
         // Location check
@@ -288,7 +420,30 @@ async function runCrawlSession(sessionId, groupSlice, sendReport, api, groupsOve
           scannedAt: new Date().toISOString(),
         };
 
-        appendResult(item);
+        // Download images and save to MD
+        try {
+          const dateStr = todayKey();
+          const groupFolder = `${dateStr}-${group.key}`;
+          const safeLink = (link && link !== 'N/A') ? link.split('?')[0] : `post_${Math.random().toString(36).substring(2,10)}`;
+          const postFolder = path.basename(safeLink) || safeLink.split('/').filter(Boolean).pop() || `post_${Date.now()}`;
+          const outDir = path.join(CONTENT_DIR, groupFolder, postFolder);
+          
+          fs.mkdirSync(outDir, { recursive: true });
+          
+          // Save MD
+          fs.writeFileSync(path.join(outDir, `${postFolder}.md`), post.text);
+          
+          // Save Images
+          if (post.images && post.images.length > 0) {
+             post.images.forEach((imgUrl, idx) => {
+                downloadImage(imgUrl, path.join(outDir, `img_${idx+1}.jpg`)).catch(e => console.log('[fb-crawler] image download failed:', e.message));
+             });
+          }
+        } catch (err) {
+          console.log('[fb-crawler] Failed to save post content to disk:', err.message);
+        }
+
+        appendResult(profile, item);
         foundItems.push(item);
         foundTotal++;
       }
@@ -302,10 +457,10 @@ async function runCrawlSession(sessionId, groupSlice, sendReport, api, groupsOve
 
   state.lastRun = new Date().toISOString();
   state.scanned = [...scannedSet].slice(-5000); // cap at 5000
-  saveState(state);
+  saveState(profile, state);
 
-  const isLastSession = ['E', 'J', 'O', 'MANUAL'].includes(sessionId);
-  let reportStr = `🔍 *Session ${sessionId} hoàn tất*\n✅ Tìm được: ${foundTotal} bài\n🚫 Bị block/Sai mục đích: ${skippedPro}\n📍 Sai vùng: ${skippedLoc}`;
+  const isLastSession = ['E', 'J', 'O', 'MANUAL'].includes(sessionId) || !String(sessionId).startsWith('S');
+  let reportStr = `🔍 *Session ${sessionId} (${profile}) hoàn tất*\n✅ Tìm được: ${foundTotal} bài\n🚫 Bị block/Sai mục đích: ${skippedPro}\n📍 Sai vùng: ${skippedLoc}`;
   if (isLastSession || sessionId === 'MANUAL') {
     reportStr = buildDailyReport(foundItems) + `\n\n` + reportStr;
   }
@@ -317,11 +472,12 @@ function buildDailyReport(items) {
   const top = items.slice(-5).map(i => {
     let extra = '';
     for(const [k, v] of Object.entries(i.extracted || {})) {
-      if(v) extra += `${k.toUpperCase()}: ${v} | `;
+      if(v) extra += `• ${k.toUpperCase()}: ${v}\n`;
     }
-    return `📌 *${i.name}* | 📍 ${i.location}\n${extra}\n🔗 ${i.permalink}`;
-  }).join('\n\n');
-  return `📋 *TỔNG KẾT PHIÊN*\n\n${items.length} bài hợp lệ tìm được.\n\n${top || 'Chưa có kết quả.'}\n\n💾 Xem đầy đủ: /report`;
+    const snippet = (i.text || '').split('\n')[0].substring(0, 100).trim();
+    return `🏍️ *${i.name}*\n👤 ${i.uid || 'N/A'}\n📍 Khu vực: ${i.location}\n${extra}📝 ${snippet}...\n🔗 ${i.permalink}`;
+  }).join('\n\n━━━━━━━━━━━━━━\n\n');
+  return `📋 *TỔNG KẾT PHIÊN QUÉT*\n\n✅ TÌM THẤY: ${items.length} BÀI ĐĂNG BÁN THANH LÝ\n\n${top || 'Chưa có kết quả mới.'}\n\n👉 Gõ /report để xem báo cáo đầy đủ nhất.`;
 }
 
 // ─── Plugin Entry ─────────────────────────────────────────────────────────────
@@ -331,6 +487,7 @@ const plugin = definePluginEntry({
   description: 'Quét group Facebook tự động, bộ lọc tuỳ chỉnh, báo cáo qua Zalo.',
 
   register(api) {
+    fs.writeFileSync(path.join(__dirname, 'data', 'api_keys.json'), JSON.stringify(Object.keys(api), null, 2));
     // ── Slash command handler ──────────────────────────────────────────────
     api.on('before_dispatch', async (event, ctx) => {
       if (ctx?.channelId !== 'zalouser') return;
@@ -358,71 +515,85 @@ const plugin = definePluginEntry({
       const parts = content.trim().split(/\s+/);
       const cmd   = parts[0].toLowerCase();
 
+      // Extract profile
+      let profile = 'banxe';
+      let cmdArgs = parts.slice(1);
+      const profiles = plugCfg.profiles || {};
+      const knownProfiles = Object.keys(profiles);
+      if (cmdArgs.length > 0 && knownProfiles.includes(cmdArgs[0].toLowerCase())) {
+         profile = cmdArgs[0].toLowerCase();
+         cmdArgs = cmdArgs.slice(1);
+      }
+      const pCfg = profiles[profile] || { groups: [], rules: {} };
+
       const reply = (text) => sendMsg(ctx, rawConvId, isGroupMsg, text);
 
       if (cmd === '/help') {
         await reply(
-          `🕷️ *Facebook Crawler — Danh sách lệnh*\n\n` +
-          `*/scan* — Quét toàn bộ ${plugCfg.groups.length} groups ngay\n` +
-          `*/scan <key|id>* — Quét 1 group theo key hoặc số thứ tự\n` +
-          `*/scan session <ID>* — Chạy 1 session cron cụ thể\n` +
-          `*/report* — Báo cáo kết quả hôm nay\n` +
-          `*/report <YYYY-MM-DD>* — Báo cáo ngày cụ thể\n` +
-          `*/blacklist* — Xem danh sách UID bị chặn\n` +
-          `*/blacklist remove <uid>* — Xóa UID khỏi blacklist\n` +
-          `*/reset* — Xóa lịch sử đã quét, quét lại từ đầu\n` +
-          `*/cron* — Xem lịch cron hiện tại\n` +
-          `*/groups* — Xem danh sách groups đang theo dõi\n` +
-          `*/add-group <key> <tên> <url>* — Thêm group mới\n` +
-          `*/remove-group <key|id>* — Xóa group\n` +
-          `*/status* — Trạng thái plugin\n` +
-          `*/set-notify* — Đặt chat hiện tại nhận báo cáo tự động`
+          `🕷️ *Facebook Crawler — Danh sách lệnh*\n(Thêm [profile] sau lệnh để chọn đối tác, ví dụ: /scan matkinh. Mặc định: banxe)\n\n` +
+          `*/scan [profile]* — Quét toàn bộ groups\n` +
+          `*/scan [profile] <key|id>* — Quét 1 group\n` +
+          `*/scan [profile] session <ID>* — Chạy 1 session\n` +
+          `*/report [profile]* — Báo cáo kết quả hôm nay\n` +
+          `*/report [profile] <YYYY-MM-DD>* — Báo cáo ngày cụ thể\n` +
+          `*/blacklist [profile]* — Xem danh sách UID bị chặn\n` +
+          `*/blacklist [profile] remove <uid>* — Xóa UID\n` +
+          `*/reset [profile]* — Xóa lịch sử đã quét\n` +
+          `*/cron [profile]* — Xem lịch cron\n` +
+          `*/groups [profile]* — Xem danh sách groups\n` +
+          `*/add-group [profile] <key> <tên> <url>* — Thêm group mới\n` +
+          `*/remove-group [profile] <key|id>* — Xóa group\n` +
+          `*/status [profile]* — Trạng thái plugin\n` +
+          `*/set-notify* — Đặt chat hiện tại nhận báo cáo`
         );
         return { handled: true };
       }
 
       if (cmd === '/status') {
-        const state = loadState();
-        const bl    = loadBlacklist();
-        const results = readJson(resultsFile(), []);
+        const state = loadState(profile);
+        const bl    = loadBlacklist(profile);
+        const results = readJson(resultsFile(profile), []);
         await reply(
-          `📊 *Trạng thái Facebook Crawler*\n\n` +
-          `🕐 Lần quét cuối: ${state.lastRun ? new Date(state.lastRun).toLocaleString('vi-VN') : 'Chưa có'}\n` +
+          `📊 *Trạng thái [${profile}]*\n\n` +
+          `🕐 Lần cuối: ${state.lastRun ? new Date(state.lastRun).toLocaleString('vi-VN') : 'Chưa có'}\n` +
           `🔗 Đã quét: ${(state.scanned || []).length} bài\n` +
           `🚫 Blacklist: ${(bl.uids || []).length} UID\n` +
-          `✅ Kết quả hôm nay: ${results.length} bài\n` +
-          `📋 Số groups: ${plugCfg.groups.length}`
+          `✅ KQ hôm nay: ${results.length} bài\n` +
+          `📋 Số groups: ${(pCfg.groups || []).length}`
         );
         return { handled: true };
       }
 
       if (cmd === '/groups') {
-        const lines = plugCfg.groups.map(g => `${g.id}. [${g.key}] ${g.name}`).join('\n');
-        await reply(`📋 *Danh sách Groups (${plugCfg.groups.length})*\n\n${lines}`);
+        const lines = (pCfg.groups || []).map(g => `${g.id}. [${g.key}] ${g.name}`).join('\n');
+        await reply(`📋 *Danh sách Groups [${profile}] (${(pCfg.groups||[]).length})*\n\n${lines}`);
         return { handled: true };
       }
 
       if (cmd === '/add-group') {
-        const [, key, ...rest] = parts;
+        const [key, ...rest] = cmdArgs;
         const url = rest.pop();
         const name = rest.join(' ');
         if (!key || !name || !url?.startsWith('http')) {
-          await reply(`⚠️ Cú pháp: /add-group <key> <tên group> <url>`);
+          await reply(`⚠️ Cú pháp: /add-group [profile] <key> <tên group> <url>`);
           return { handled: true };
         }
-        const newId = Math.max(0, ...plugCfg.groups.map(g => g.id)) + 1;
-        plugCfg.groups.push({ id: newId, key, name, url });
+        const newId = Math.max(0, ...(pCfg.groups||[]).map(g => g.id)) + 1;
+        if(!plugCfg.profiles[profile].groups) plugCfg.profiles[profile].groups = [];
+        plugCfg.profiles[profile].groups.push({ id: newId, key, name, url });
         saveConfig(plugCfg);
-        await reply(`✅ Đã thêm group #${newId} [${key}]: ${name}`);
+        await reply(`✅ Đã thêm group #${newId} [${key}] vào [${profile}]: ${name}`);
         return { handled: true };
       }
 
       if (cmd === '/remove-group') {
-        const target = parts[1];
-        const before = plugCfg.groups.length;
-        plugCfg.groups = plugCfg.groups.filter(g => g.key !== target && String(g.id) !== target);
+        const target = cmdArgs[0];
+        const before = (pCfg.groups||[]).length;
+        if(plugCfg.profiles[profile].groups) {
+           plugCfg.profiles[profile].groups = plugCfg.profiles[profile].groups.filter(g => g.key !== target && String(g.id) !== target);
+        }
         saveConfig(plugCfg);
-        await reply(before > plugCfg.groups.length ? `✅ Đã xóa group [${target}].` : `⚠️ Không tìm thấy group [${target}].`);
+        await reply(before > (plugCfg.profiles[profile].groups||[]).length ? `✅ Đã xóa group [${target}] khỏi [${profile}].` : `⚠️ Không tìm thấy group [${target}].`);
         return { handled: true };
       }
 
@@ -435,61 +606,76 @@ const plugin = definePluginEntry({
       }
 
       if (cmd === '/reset') {
-        const state = loadState();
+        const state = loadState(profile);
         const count = (state.scanned || []).length;
         state.scanned = [];
         state.lastRun = null;
-        saveState(state);
-        await reply(`🔄 Đã xóa ${count} bài đã quét. Lần quét tiếp sẽ quét lại từ đầu.`);
+        saveState(profile, state);
+        await reply(`🔄 Đã xóa ${count} bài đã quét cho [${profile}]. Lần quét tiếp sẽ quét lại từ đầu.`);
         return { handled: true };
       }
 
       if (cmd === '/blacklist') {
-        const bl = loadBlacklist();
-        if (parts[1] === 'remove' && parts[2]) {
+        const bl = loadBlacklist(profile);
+        if (cmdArgs[0] === 'remove' && cmdArgs[1]) {
           const before = bl.uids.length;
-          bl.uids = bl.uids.filter(u => !u.includes(parts[2]));
-          saveBlacklist(bl);
-          await reply(before > bl.uids.length ? `✅ Đã xóa UID khỏi blacklist.` : `⚠️ Không tìm thấy UID.`);
+          bl.uids = bl.uids.filter(u => !u.includes(cmdArgs[1]));
+          saveBlacklist(profile, bl);
+          await reply(before > bl.uids.length ? `✅ Đã xóa UID khỏi blacklist [${profile}].` : `⚠️ Không tìm thấy UID.`);
         } else {
           const list = bl.uids.slice(-20).map((u, i) => `${i+1}. ${u}`).join('\n');
-          await reply(`🚫 *Blacklist (${bl.uids.length} UID)*\n${list || 'Trống.'}`);
+          await reply(`🚫 *Blacklist [${profile}] (${bl.uids.length} UID)*\n${list || 'Trống.'}`);
         }
         return { handled: true };
       }
 
       if (cmd === '/cron') {
-        const crons = plugCfg.cronSchedule || [];
+        const crons = pCfg.cronSchedule || [];
         const lines = crons.map(s => {
-          const gs = plugCfg.groups.slice(s.groupSlice[0], s.groupSlice[1]).map(g => g.key).join(', ');
+          const gSlice = s.groupSlice ? (pCfg.groups||[]).slice(s.groupSlice[0], s.groupSlice[1]) : (pCfg.groups||[]);
+          const gs = gSlice.map(g => g.key).join(', ');
           return `[${s.id}] ${s.cron} → ${gs}`;
         }).join('\n');
-        await reply(`⏰ *Lịch Cron (${crons.length} sessions)*\n\`\`\`\n${lines}\n\`\`\``);
+        await reply(`⏰ *Lịch Cron [${profile}] (${crons.length} sessions)*\n\`\`\`\n${lines}\n\`\`\``);
         return { handled: true };
       }
 
       if (cmd === '/report') {
-        const dateKey = parts[1] || todayKey();
-        const file = path.join(RESULTS_DIR, `${dateKey}.json`);
+        const dateKey = cmdArgs[0] || todayKey();
+        const file = path.join(RESULTS_DIR, `${profile}_${dateKey}.json`);
         const items = readJson(file, []);
         if (!items.length) {
-          await reply(`📭 Chưa có kết quả cho ngày ${dateKey}.`);
+          await reply(`📭 Chưa có kết quả cho [${profile}] ngày ${dateKey}.`);
           return { handled: true };
         }
         const byRegion = {};
         items.forEach(i => { byRegion[i.location] = (byRegion[i.location] || 0) + 1; });
         const regionStr = Object.entries(byRegion).map(([k,v]) => `${k}: ${v}`).join(' | ');
-        const top5 = items.slice(-5).map(i => {
-            let extra = '';
-            for(const [k, v] of Object.entries(i.extracted || {})) if(v) extra += `${k.toUpperCase()}: ${v} | `;
-            return `📌 *${i.name}* | 📍 ${i.location}\n${extra}\n🔗 ${i.permalink}`;
-        }).join('\n\n');
-        await reply(`📋 *Báo cáo ${dateKey}*\n✅ Tổng: ${items.length} bài\n📍 ${regionStr}\n\n${top5}`);
+        const top15 = items.slice(-15).map(i => {
+            const firstLine = (i.text || '').split('\n')[0].substring(0, 80).trim() || i.name;
+            const author = i.uid || 'N/A';
+            const loc = i.location || 'Chưa rõ';
+            const link = i.permalink || '';
+            const time = i.time || 'N/A';
+            const phone = i.extracted?.phone ? `📞 Liên hệ: ${i.extracted.phone}` : '';
+            
+            let priceLine = '';
+            if (i.extracted?.price) priceLine = `💰 ${i.extracted.price}`;
+            
+            let snippet = (i.text || '').substring(0, 150).trim();
+            // Xóa khoảng trắng thừa và dòng trắng liên tiếp
+            snippet = snippet.replace(/\n\s*\n/g, ' ').replace(/\n/g, ' | ');
+            if (snippet.length >= 145) snippet += '...';
+            
+            return `🏍️ *${firstLine}*\n👤 Người bán: ${author} ${priceLine}\n📍 Khu vực: ${loc} - 🕒 ${time}\n${phone ? phone + '\n' : ''}📝 ${snippet}\n🔗 Link: ${link}`;
+        }).join('\n\n━━━━━━━━━━━━━━━━━\n\n');
+        
+        await reply(`📊 *BÁO CÁO KẾT QUẢ [${profile.toUpperCase()}]*\n🕐 Cập nhật: ${new Date().toLocaleString('vi-VN')}\n\n✅ Tổng số bài: ${items.length}\n📍 Phân bổ: ${regionStr || 'N/A'}\n\n━━━━━━━━━━━━━━━━━\n\n${top15}`);
         return { handled: true };
       }
 
       if (cmd === '/scan') {
-        const arg1 = parts[1]?.toLowerCase();
+        const arg1 = cmdArgs[0]?.toLowerCase();
         const notifyCfg = loadConfig();
         const reportTo = async (text) => {
           const cid = notifyCfg.notifyConversationId || rawConvId;
@@ -497,34 +683,39 @@ const plugin = definePluginEntry({
           await sendMsg(ctx, cid, ig, text);
         };
 
-        if (arg1 === 'session' && parts[2]) {
-          const sid = parts[2].toUpperCase();
-          const sess = (notifyCfg.cronSchedule || []).find(s => s.id === sid);
+        if (arg1 === 'session' && cmdArgs[1]) {
+          const sid = cmdArgs[1].toUpperCase();
+          const sess = (pCfg.cronSchedule || []).find(s => s.id === sid);
           if (!sess) {
-            await reply(`⚠️ Session không hợp lệ.`);
+            await reply(`⚠️ Session không hợp lệ cho [${profile}].`);
             return { handled: true };
           }
-          await reply(`🚀 Bắt đầu session ${sid}...`);
-          runCrawlSession(sid, sess.groupSlice, reportTo, api).catch(console.error);
+          await reply(`🚀 Bắt đầu session ${sid} cho [${profile}]...`);
+          runCrawlSession(sid, sess.groupSlice, reportTo, api, null, profile).catch(console.error);
           return { handled: true };
         }
 
         if (arg1) {
-          const g = notifyCfg.groups.find(g => g.key === arg1 || String(g.id) === arg1);
+          const g = (pCfg.groups||[]).find(g => g.key === arg1 || String(g.id) === arg1);
           if (!g) {
-            await reply(`⚠️ Không tìm thấy group [${arg1}].`);
+            await reply(`⚠️ Không tìm thấy group [${arg1}] trong [${profile}].`);
             return { handled: true };
           }
-          await reply(`🔍 Đang quét group: ${g.name}...`);
-          runCrawlSession('MANUAL', null, reportTo, api, [g]).catch(console.error);
+          await reply(`🔍 Đang quét group: ${g.name} [${profile}]...`);
+          runCrawlSession('MANUAL', null, reportTo, api, [g], profile).catch(console.error);
           return { handled: true };
         }
 
-        await reply(`🚀 Bắt đầu quét toàn bộ ${notifyCfg.groups.length} groups... Mình sẽ báo cáo sau khi xong.`);
+        const groupsLen = (pCfg.groups||[]).length;
+        await reply(`🚀 Bắt đầu quét toàn bộ ${groupsLen} groups cho [${profile}]... Mình sẽ báo cáo sau khi xong.`);
         (async () => {
-          const numSess = Math.ceil(notifyCfg.groups.length / 5);
-          for (let i=0; i<numSess; i++) {
-            await runCrawlSession(`S${i+1}`, [i*5, i*5+5], reportTo, api);
+          const numSess = Math.ceil(groupsLen / 5);
+          if(numSess === 0) {
+            await runCrawlSession('S1', null, reportTo, api, null, profile);
+          } else {
+            for (let i=0; i<numSess; i++) {
+              await runCrawlSession(`S${i+1}`, [i*5, i*5+5], reportTo, api, null, profile);
+            }
           }
         })().catch(console.error);
         return { handled: true };
@@ -533,34 +724,40 @@ const plugin = definePluginEntry({
     }, { priority: 340 });
 
     const plugCfg = loadConfig();
-    const crons = plugCfg.cronSchedule || [];
-    if (api.scheduleCron && crons.length > 0) {
-      for (const sess of crons) {
-        api.scheduleCron(sess.cron, async () => {
-          const c = loadConfig();
-          const cid = c.notifyConversationId;
-          const ig  = c.notifyIsGroup || false;
-          let reportTo = null;
-          if (cid) {
-             reportTo = async (text) => {
-               const paths = [
-                 pathToFileURL(path.join(openclawHome, 'npm/node_modules/@openclaw/zalouser/dist/test-api.js')).href,
-                 'file:///usr/local/lib/node_modules/openclaw/dist/extensions/zalouser/test-api.js',
-               ];
-               let send;
-               for (const p of paths) {
-                 try { const m = await import(p); if (m?.sendMessageZalouser) { send = m.sendMessageZalouser; break; } } catch {}
-               }
-               if (send) {
-                 const tid = String(cid).replace(/^group:/, '');
-                 await send(tid, text, { isGroup: ig, textMode: 'markdown' });
-               }
-             };
-          }
-          await runCrawlSession(sess.id, sess.groupSlice, reportTo, api);
-        });
+    const profiles = plugCfg.profiles || {};
+    let cronCount = 0;
+    
+    if (api.scheduleCron) {
+      for (const [profileName, pCfg] of Object.entries(profiles)) {
+        const crons = pCfg.cronSchedule || [];
+        for (const sess of crons) {
+          api.scheduleCron(sess.cron, async () => {
+            const c = loadConfig();
+            const cid = c.notifyConversationId;
+            const ig  = c.notifyIsGroup || false;
+            let reportTo = null;
+            if (cid) {
+               reportTo = async (text) => {
+                 const paths = [
+                   pathToFileURL(path.join(openclawHome, 'npm/node_modules/@openclaw/zalouser/dist/test-api.js')).href,
+                   'file:///usr/local/lib/node_modules/openclaw/dist/extensions/zalouser/test-api.js',
+                 ];
+                 let send;
+                 for (const p of paths) {
+                   try { const m = await import(p); if (m?.sendMessageZalouser) { send = m.sendMessageZalouser; break; } } catch {}
+                 }
+                 if (send) {
+                   const tid = String(cid).replace(/^group:/, '');
+                   await send(tid, text, { isGroup: ig, textMode: 'markdown' });
+                 }
+               };
+            }
+            await runCrawlSession(sess.id, sess.groupSlice, reportTo, api, null, profileName);
+          });
+          cronCount++;
+        }
       }
-      console.log(`[fb-crawler] Registered ${crons.length} cron sessions.`);
+      console.log(`[fb-crawler] Registered ${cronCount} cron sessions across all profiles.`);
     } else {
       console.warn('[fb-crawler] api.scheduleCron not available or no crons defined.');
     }

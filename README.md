@@ -1,26 +1,53 @@
-# OpenClaw Facebook Crawler
+# openclaw-facebook-crawler
 
-*Read this in other languages: [Tiếng Việt](README.vi.md)*
+Plugin OpenClaw tự động quét các group Facebook, lọc bài đăng theo cấu hình từ khóa (require, block), phân loại vùng miền (locations), dùng regex trích xuất dữ liệu, và tổng hợp kết quả theo lịch cron.
 
-A generic rule-based Facebook Group Crawler plugin for OpenClaw. It automates browser interactions to scrape posts from configured Facebook groups based on precise keywords, regex rules, and locations. 
+## Tính Năng Đa Dụng
 
-It is designed to easily map and filter data (like tracking motorbike sales, real estate, or job listings) using a customizable `config.json` without modifying code.
+Plugin này không bị giới hạn ở một mục đích. Bạn có thể sử dụng cho:
+- Săn hàng thanh lý, mua bán đồ cũ (xe máy, đồ công nghệ).
+- Quét bài đăng việc làm, tuyển dụng.
+- Tìm kiếm bất động sản, phòng trọ.
 
-## Features
-- **Data-Driven Configuration**: Easily configure target groups, allowed/blocked keywords, and regex rules in JSON.
-- **Location Filter**: Group and identify posts by region (e.g., mapping cities/provinces to custom tags).
-- **Spam & Pro-seller Bypass**: Filter out commercial posts using blocklists.
-- **Deduplication**: Remembers what it has scraped locally in `data/` to avoid duplicates.
-- **Native Cron Integration**: Exposes `/scan session <id>` to work perfectly with OpenClaw Native Cron.
-- **Zalo Admin Controls**: Provides slash commands in Zalo for full control.
+Tất cả được cấu hình thông qua file `config.json`.
 
-## Installation
+- 🔍 Quét tuần tự nhiều Facebook groups.
+- 🚫 Tự phát hiện và block các đối tượng (proseller, spam) dựa vào `blockKeywords`.
+- ✅ Lọc những bài thỏa mãn yêu cầu dựa vào `requireKeywords`.
+- 📍 Lọc vùng miền linh hoạt dựa vào bộ `locations`.
+- 📞 Trích xuất dữ liệu tùy chỉnh bằng Regex (ví dụ: SĐT).
+- ⏰ Chạy định kỳ thông qua cơ chế Cron sessions (chia nhỏ để tránh timeout bot).
+- 💾 Lưu kết quả theo ngày (`data/results/YYYY-MM-DD.json`).
+- 🚷 Chặn người dùng tự động (Blacklist UID).
+
+## Slash Commands
+
+| Lệnh | Mô tả |
+|---|---|
+| `/help` | Xem toàn bộ lệnh |
+| `/scan` | Quét toàn bộ các groups ngay |
+| `/scan <key\|id>` | Quét 1 group cụ thể (vd: `/scan nvx`) |
+| `/scan session <ID>` | Chạy 1 session cron cụ thể |
+| `/report` | Báo cáo kết quả hôm nay |
+| `/report <YYYY-MM-DD>` | Báo cáo ngày cụ thể |
+| `/groups` | Xem danh sách groups đang theo dõi |
+| `/add-group <key> <tên> <url>` | Thêm group mới |
+| `/remove-group <key\|id>` | Xóa group |
+| `/blacklist` | Xem danh sách UID bị chặn |
+| `/blacklist remove <uid>` | Xóa UID khỏi blacklist |
+| `/reset` | Xóa lịch sử đã quét, bắt đầu lại từ đầu |
+| `/cron` | Xem cấu hình lịch cron |
+| `/status` | Trạng thái plugin (last run, tổng bài, v.v.) |
+| `/set-notify` | Đặt chat hiện tại nhận báo cáo tự động |
+
+## Cài đặt
 
 ```bash
-openclaw plugins install clawhub:openclaw-facebook-crawler
+# Qua ClawHub
+/install openclaw-facebook-crawler
 ```
 
-Or copy to your `extensions/` directory and enable in `openclaw.json`:
+Hoặc qua local (sao chép vào thư mục `extensions/`), sau đó bật trong `openclaw.json`:
 ```json
 "plugins": {
   "entries": {
@@ -30,20 +57,32 @@ Or copy to your `extensions/` directory and enable in `openclaw.json`:
 }
 ```
 
-## Slash Commands
-*(Available in Zalo)*
-| Command | Action |
-|---------|--------|
-| `/scan` | Force scan all configured groups immediately |
-| `/scan <key\|id>` | Scan a specific group by its key |
-| `/scan session <ID>` | Run a specific cron session (e.g., `/scan session A`) |
-| `/report` | Send a summary report for today |
-| `/groups` | List all monitored groups |
-| `/blacklist` | View the blocked UID list |
-| `/reset` | Clear scanned history |
-| `/cron` | View the cron configuration map |
-| `/status` | View plugin stats and memory |
-| `/set-notify` | Set the current chat to receive automatic reports |
+## Cấu Hình Tuỳ Chỉnh (`config.json`)
 
-## Architecture Notes
-Requires `browser-tool.js` provided by the OpenClaw browser module to be active to perform the actual Facebook interaction.
+File `config.json` nằm trong thư mục gốc của plugin. Bạn có thể thay đổi để phục vụ các mục đích khác nhau:
+
+```json
+{
+  "rules": {
+    "requireKeywords": ["bán", "thanh lý"],
+    "blockKeywords": ["cửa hàng", "salon"],
+    "locations": {
+      "hcm": ["hcm", "sài gòn", "q1", "q12"],
+      "hanoi": ["hà nội", "hoàn kiếm"]
+    },
+    "extractRegex": {
+      "phone": "(0[35789]\\d{8}|0[12]\\d{8})"
+    }
+  },
+  "cronSchedule": [
+    { "id": "A", "cron": "0 7 * * *", "groupSlice": [0, 5] },
+    { "id": "B", "cron": "30 7 * * *", "groupSlice": [5, 10] }
+  ],
+  "groups": [
+    { "id": 1, "key": "chotot", "name": "Chợ Tốt VN", "url": "https://..." }
+  ]
+}
+```
+
+## License
+MIT

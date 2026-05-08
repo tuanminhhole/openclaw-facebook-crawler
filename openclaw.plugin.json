@@ -5,6 +5,7 @@
   "version": "1.0.6",
   "enabledByDefault": true,
   "runtimeId": "openclaw-facebook-crawler",
+  "author": "tuanminhhole",
   "capabilityTags": [
     "facebook",
     "crawler",
