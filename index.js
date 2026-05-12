@@ -14,13 +14,15 @@ const __dirname = path.dirname(__filename);
 const openclawHome = path.resolve(__dirname, '..', '..');
 
 // ─── Paths ────────────────────────────────────────────────────────────────────
-const DATA_DIR     = path.join(__dirname, 'data');
+const DATA_DIR     = path.join(openclawHome, 'plugins-data', 'fb-crawler');
 const RESULTS_DIR  = path.join(DATA_DIR, 'results');
 const RAW_DIR      = path.join(DATA_DIR, 'raw');
 const CONTENT_DIR  = path.join(DATA_DIR, 'content');
 const STATE_FILE   = path.join(DATA_DIR, 'state.json');
 const BLACK_FILE   = path.join(DATA_DIR, 'blacklist_uid.json');
-const CONFIG_FILE  = path.join(__dirname, 'config.json');
+const CONFIG_FILE  = path.join(openclawHome, 'plugins-data', 'fb-crawler-config.json');
+const CRON_LOG_FILE = path.join(DATA_DIR, 'cron-service.jsonl');
+const CRON_TIMEZONE = 'Asia/Ho_Chi_Minh';
 
 for (const d of [DATA_DIR, RESULTS_DIR, RAW_DIR, CONTENT_DIR]) {
   if (!fs.existsSync(d)) fs.mkdirSync(d, { recursive: true });
@@ -32,6 +34,12 @@ function readJson(file, def = {}) {
 }
 function writeJson(file, data) {
   fs.writeFileSync(file, JSON.stringify(data, null, 2));
+}
+
+function appendCronLog(entry) {
+  try {
+    fs.appendFileSync(CRON_LOG_FILE, JSON.stringify({ ts: new Date().toISOString(), ...entry }) + '\n');
+  } catch {}
 }
 
 function downloadImage(url, dest) {
@@ -459,17 +467,19 @@ async function runCrawlSession(sessionId, groupSlice, sendReport, api, groupsOve
   state.scanned = [...scannedSet].slice(-5000); // cap at 5000
   saveState(profile, state);
 
-  const isLastSession = ['E', 'J', 'O', 'MANUAL'].includes(sessionId) || !String(sessionId).startsWith('S');
   let reportStr = `🔍 *Session ${sessionId} (${profile}) hoàn tất*\n✅ Tìm được: ${foundTotal} bài\n🚫 Bị block/Sai mục đích: ${skippedPro}\n📍 Sai vùng: ${skippedLoc}`;
-  if (isLastSession || sessionId === 'MANUAL') {
-    reportStr = buildDailyReport(foundItems) + `\n\n` + reportStr;
+  
+  if (foundItems.length > 0) {
+    reportStr = buildSessionReport(foundItems, sessionId) + `\n\n` + reportStr;
+  } else {
+    reportStr = `📋 *KẾT QUẢ SESSION ${sessionId}*\n\nKhông có bài viết hợp lệ nào mới.\n\n` + reportStr;
   }
 
   if (sendReport) await sendReport(reportStr);
 }
 
-function buildDailyReport(items) {
-  const top = items.slice(-5).map(i => {
+function buildSessionReport(items, sessionId) {
+  const top = items.slice(-10).map(i => {
     let extra = '';
     for(const [k, v] of Object.entries(i.extracted || {})) {
       if(v) extra += `• ${k.toUpperCase()}: ${v}\n`;
@@ -477,7 +487,7 @@ function buildDailyReport(items) {
     const snippet = (i.text || '').split('\n')[0].substring(0, 100).trim();
     return `🏍️ *${i.name}*\n👤 ${i.uid || 'N/A'}\n📍 Khu vực: ${i.location}\n${extra}📝 ${snippet}...\n🔗 ${i.permalink}`;
   }).join('\n\n━━━━━━━━━━━━━━\n\n');
-  return `📋 *TỔNG KẾT PHIÊN QUÉT*\n\n✅ TÌM THẤY: ${items.length} BÀI ĐĂNG BÁN THANH LÝ\n\n${top || 'Chưa có kết quả mới.'}\n\n👉 Gõ /report để xem báo cáo đầy đủ nhất.`;
+  return `📋 *BÁO CÁO SESSION ${sessionId}*\n\n✅ TÌM THẤY: ${items.length} BÀI ĐĂNG BÁN MỚI\n\n${top}\n\n👉 Gõ /report để xem toàn bộ báo cáo trong ngày.`;
 }
 
 // ─── Plugin Entry ─────────────────────────────────────────────────────────────
@@ -487,10 +497,14 @@ const plugin = definePluginEntry({
   description: 'Quét group Facebook tự động, bộ lọc tuỳ chỉnh, báo cáo qua Zalo.',
 
   register(api) {
-    fs.writeFileSync(path.join(__dirname, 'data', 'api_keys.json'), JSON.stringify(Object.keys(api), null, 2));
     // ── Slash command handler ──────────────────────────────────────────────
     api.on('before_dispatch', async (event, ctx) => {
-      if (ctx?.channelId !== 'zalouser') return;
+      console.log('[fb-crawler] before_dispatch triggered:', JSON.stringify({ event, ctx }).slice(0, 500));
+      const isCronOrSystem = !ctx?.channelId || ctx?.channelId === 'system' || ctx?.channelId === 'cron' || !event?.senderId || event?.senderId === 'system';
+      if (!isCronOrSystem && ctx?.channelId !== 'zalouser') {
+         console.log('[fb-crawler] ignoring: channelId is not zalouser and not system/cron');
+         return;
+      }
 
       const content = String(event?.body || event?.content || '').trim();
       if (!content.startsWith('/')) return;
@@ -508,9 +522,13 @@ const plugin = definePluginEntry({
         return { handled: true };
       }
 
-      const isAdmin = plugCfg.adminIds.includes(senderId) ||
+      const isAdmin = isCronOrSystem || plugCfg.adminIds.includes(senderId) ||
         (api.config?.ownerId && api.config.ownerId === senderId);
-      if (!isAdmin) return;
+      if (!isAdmin) {
+         console.log('[fb-crawler] ignoring: not admin, senderId:', senderId, 'isCronOrSystem:', isCronOrSystem);
+         return;
+      }
+      console.log('[fb-crawler] isAdmin = true, parsing cmd:', content);
 
       const parts = content.trim().split(/\s+/);
       const cmd   = parts[0].toLowerCase();
@@ -723,43 +741,106 @@ const plugin = definePluginEntry({
 
     }, { priority: 340 });
 
-    const plugCfg = loadConfig();
-    const profiles = plugCfg.profiles || {};
-    let cronCount = 0;
-    
-    if (api.scheduleCron) {
-      for (const [profileName, pCfg] of Object.entries(profiles)) {
-        const crons = pCfg.cronSchedule || [];
-        for (const sess of crons) {
-          api.scheduleCron(sess.cron, async () => {
-            const c = loadConfig();
-            const cid = c.notifyConversationId;
-            const ig  = c.notifyIsGroup || false;
-            let reportTo = null;
-            if (cid) {
-               reportTo = async (text) => {
-                 const paths = [
-                   pathToFileURL(path.join(openclawHome, 'npm/node_modules/@openclaw/zalouser/dist/test-api.js')).href,
-                   'file:///usr/local/lib/node_modules/openclaw/dist/extensions/zalouser/test-api.js',
-                 ];
-                 let send;
-                 for (const p of paths) {
-                   try { const m = await import(p); if (m?.sendMessageZalouser) { send = m.sendMessageZalouser; break; } } catch {}
-                 }
-                 if (send) {
-                   const tid = String(cid).replace(/^group:/, '');
-                   await send(tid, text, { isGroup: ig, textMode: 'markdown' });
-                 }
-               };
+    if (api.registerService) {
+      let cronJobs = [];
+      let activeCronRun = null;
+
+      api.registerService({
+        id: 'fb-crawler-cron-service',
+        start: async () => {
+          let Cron;
+          try {
+             Cron = (await import('croner')).Cron;
+          } catch (e) {
+             console.error('[fb-crawler] failed to load croner from local node_modules, falling back...', e);
+             Cron = (await import(pathToFileURL(path.join(openclawHome, 'npm/node_modules/croner/dist/croner.js')).href)).Cron;
+          }
+          const plugCfg = loadConfig();
+          const profiles = plugCfg.profiles || {};
+
+          for (const [profileName, pCfg] of Object.entries(profiles)) {
+            if (pCfg.enabled === false) {
+              console.log(`[fb-crawler] profile ${profileName} disabled, skipping cron registration`);
+              continue;
             }
-            await runCrawlSession(sess.id, sess.groupSlice, reportTo, api, null, profileName);
-          });
-          cronCount++;
+            for (const sess of (pCfg.cronSchedule || [])) {
+              const jobName = `${profileName}_${sess.id}`;
+              const job = new Cron(sess.cron, {
+                name: `fb-crawler-${jobName}`,
+                timezone: CRON_TIMEZONE,
+                protect: true,
+                catch: (err) => {
+                  console.error(`[fb-crawler] cron ${jobName} failed:`, err);
+                  appendCronLog({ job: jobName, status: 'error', error: err?.message || String(err) });
+                },
+                unref: true
+              }, async () => {
+                if (activeCronRun) {
+                  appendCronLog({ job: jobName, status: 'skipped', reason: `active:${activeCronRun}` });
+                  return;
+                }
+
+                activeCronRun = jobName;
+                const startedAt = Date.now();
+                appendCronLog({ job: jobName, status: 'started', cron: sess.cron, groupSlice: sess.groupSlice || null });
+                try {
+                  const c = loadConfig();
+                  const cid = c.notifyConversationId;
+                  const ig  = c.notifyIsGroup || false;
+                  let reportTo = null;
+                  if (cid) {
+                    reportTo = async (text) => {
+                      const paths = [
+                        pathToFileURL(path.join(openclawHome, 'npm/node_modules/@openclaw/zalouser/dist/test-api.js')).href,
+                        'file:///usr/local/lib/node_modules/openclaw/dist/extensions/zalouser/test-api.js',
+                      ];
+                      let send;
+                      for (const p of paths) {
+                        try { const m = await import(p); if (m?.sendMessageZalouser) { send = m.sendMessageZalouser; break; } } catch {}
+                      }
+                      if (send) {
+                        const tid = String(cid).replace(/^group:/, '');
+                        await send(tid, text, { isGroup: ig, textMode: 'markdown' });
+                      }
+                    };
+                  }
+                  await runCrawlSession(sess.id, sess.groupSlice, reportTo, api, null, profileName);
+                  appendCronLog({ job: jobName, status: 'ok', durationMs: Date.now() - startedAt });
+                } catch (err) {
+                  appendCronLog({ job: jobName, status: 'error', durationMs: Date.now() - startedAt, error: err?.message || String(err) });
+                  throw err;
+                } finally {
+                  activeCronRun = null;
+                }
+              });
+              cronJobs.push(job);
+
+              if (api.registerSessionSchedulerJob) {
+                api.registerSessionSchedulerJob({
+                  id: jobName,
+                  sessionKey: `plugin:openclaw-facebook-crawler:${jobName}`,
+                  kind: 'cron',
+                  description: `Facebook crawler cron ${jobName}: ${sess.cron}`
+                });
+              }
+            }
+          }
+
+          appendCronLog({ status: 'service-started', jobs: cronJobs.length, timezone: CRON_TIMEZONE });
+          console.log(`[fb-crawler] Cron service registered ${cronJobs.length} cron sessions across all profiles.`);
+        },
+        stop: async () => {
+          for (const job of cronJobs) {
+            try { job.stop(); } catch {}
+          }
+          appendCronLog({ status: 'service-stopped', jobs: cronJobs.length });
+          cronJobs = [];
+          activeCronRun = null;
         }
-      }
-      console.log(`[fb-crawler] Registered ${cronCount} cron sessions across all profiles.`);
+      });
     } else {
-      console.warn('[fb-crawler] api.scheduleCron not available or no crons defined.');
+      console.warn('[fb-crawler] api.registerService not available; cron service disabled.');
+      appendCronLog({ status: 'service-unavailable', reason: 'api.registerService missing' });
     }
   },
 });

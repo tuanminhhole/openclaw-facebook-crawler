@@ -1,12 +1,13 @@
 # OpenClaw Facebook Crawler
 
-*Read this in other languages: [English](README.md)*
+_Read this in other languages: [English](README.md)_
 
 Plugin OpenClaw tự động quét các group Facebook, lọc bài đăng theo cấu hình từ khóa (require, block), phân loại vùng miền (locations), dùng regex trích xuất dữ liệu, và tổng hợp kết quả theo lịch cron.
 
 ## Tính Năng Đa Dụng
 
 Plugin này không bị giới hạn ở một mục đích. Bạn có thể sử dụng cho:
+
 - Săn hàng thanh lý, mua bán đồ cũ (xe máy, đồ công nghệ).
 - Quét bài đăng việc làm, tuyển dụng.
 - Tìm kiếm bất động sản, phòng trọ.
@@ -24,32 +25,41 @@ Tất cả được cấu hình thông qua file `config.json`.
 
 ## Slash Commands
 
-| Lệnh | Mô tả |
-|---|---|
-| `/help` | Xem toàn bộ lệnh |
-| `/scan` | Quét toàn bộ các groups ngay |
-| `/scan <key\|id>` | Quét 1 group cụ thể (vd: `/scan nvx`) |
-| `/scan session <ID>` | Chạy 1 session cron cụ thể |
-| `/report` | Báo cáo kết quả hôm nay |
-| `/report <YYYY-MM-DD>` | Báo cáo ngày cụ thể |
-| `/groups` | Xem danh sách groups đang theo dõi |
-| `/add-group <key> <tên> <url>` | Thêm group mới |
-| `/remove-group <key\|id>` | Xóa group |
-| `/blacklist` | Xem danh sách UID bị chặn |
-| `/blacklist remove <uid>` | Xóa UID khỏi blacklist |
-| `/reset` | Xóa lịch sử đã quét, bắt đầu lại từ đầu |
-| `/cron` | Xem cấu hình lịch cron |
-| `/status` | Trạng thái plugin (last run, tổng bài, v.v.) |
-| `/set-notify` | Đặt chat hiện tại nhận báo cáo tự động |
+| Lệnh                           | Mô tả                                        |
+| ------------------------------ | -------------------------------------------- |
+| `/help`                        | Xem toàn bộ lệnh                             |
+| `/scan`                        | Quét toàn bộ các groups ngay                 |
+| `/scan <key\|id>`              | Quét 1 group cụ thể (vd: `/scan nvx`)        |
+| `/scan session <ID>`           | Chạy 1 session cron cụ thể                   |
+| `/report`                      | Báo cáo kết quả hôm nay                      |
+| `/report <YYYY-MM-DD>`         | Báo cáo ngày cụ thể                          |
+| `/groups`                      | Xem danh sách groups đang theo dõi           |
+| `/add-group <key> <tên> <url>` | Thêm group mới                               |
+| `/remove-group <key\|id>`      | Xóa group                                    |
+| `/blacklist`                   | Xem danh sách UID bị chặn                    |
+| `/blacklist remove <uid>`      | Xóa UID khỏi blacklist                       |
+| `/reset`                       | Xóa lịch sử đã quét, bắt đầu lại từ đầu      |
+| `/cron`                        | Xem cấu hình lịch cron                       |
+| `/status`                      | Trạng thái plugin (last run, tổng bài, v.v.) |
+| `/set-notify`                  | Đặt chat hiện tại nhận báo cáo tự động       |
 
 ## Cài đặt
 
 ```bash
-# Qua ClawHub
+## Qua ClawHub
+
+# Cài với OpenClaw Native
 openclaw plugins install clawhub:openclaw-facebook-crawler
 ```
 
+```bash
+# Cài với OpenClaw Docker
+docker exec openclaw-bot openclaw plugins install clawhub:openclaw-facebook-crawler --force
+docker restart openclaw-bot
+```
+
 Hoặc qua local (sao chép vào thư mục `extensions/`), sau đó bật trong `openclaw.json`:
+
 ```json
 "plugins": {
   "entries": {
