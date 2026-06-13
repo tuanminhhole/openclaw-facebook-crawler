@@ -20,13 +20,35 @@ const RAW_DIR      = path.join(DATA_DIR, 'raw');
 const CONTENT_DIR  = path.join(DATA_DIR, 'content');
 const STATE_FILE   = path.join(DATA_DIR, 'state.json');
 const BLACK_FILE   = path.join(DATA_DIR, 'blacklist_uid.json');
-const CONFIG_FILE  = path.join(openclawHome, 'plugins-data', 'fb-crawler-config.json');
+const CONFIG_FILE  = path.join(openclawHome, 'plugins-data', 'zalo-mod', 'config.json');
 const CRON_LOG_FILE = path.join(DATA_DIR, 'cron-service.jsonl');
 const CRON_TIMEZONE = 'Asia/Ho_Chi_Minh';
 
 for (const d of [DATA_DIR, RESULTS_DIR, RAW_DIR, CONTENT_DIR]) {
   if (!fs.existsSync(d)) fs.mkdirSync(d, { recursive: true });
 }
+
+// ── Auto-fix 777 permissions (Windows bind-mount issue) ──────────────────────
+// OpenClaw gateway blocks world-writable plugins. Windows bind-mounts give 0777.
+// Fix recursively using pure Node.js fs — safe, no child_process needed.
+(function fixPluginPermissions(dir, depth) {
+  if (depth > 4) return; // max 4 levels deep
+  try {
+    fs.chmodSync(dir, 0o755);
+    for (const entry of fs.readdirSync(dir)) {
+      if (entry === 'node_modules' || entry === '.git') continue;
+      try {
+        const full = path.join(dir, entry);
+        const st = fs.statSync(full);
+        if (st.isDirectory()) {
+          fixPluginPermissions(full, depth + 1);
+        } else {
+          fs.chmodSync(full, 0o644);
+        }
+      } catch (_) { /* non-blocking */ }
+    }
+  } catch (_) { /* non-blocking — ok on Windows */ }
+})(__dirname, 0);
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 function readJson(file, def = {}) {
@@ -62,8 +84,111 @@ function downloadImage(url, dest) {
   });
 }
 
-function loadConfig()    { return readJson(CONFIG_FILE, { adminIds: [], profiles: {} }); }
-function saveConfig(cfg) { writeJson(CONFIG_FILE, cfg); }
+function getProfileFromCtx(ctx, defaultProfile = 'banxe') {
+  if (ctx && ctx.sessionKey) {
+    const parts = ctx.sessionKey.split(':');
+    if (parts[0] === 'agent' && parts[1]) {
+      return parts[1];
+    }
+  }
+  if (ctx && ctx.accountId) {
+    return ctx.accountId;
+  }
+  return defaultProfile;
+}
+
+function resolveActiveProfile(profiles, requestedProfile) {
+  const keys = Object.keys(profiles);
+  if (keys.length === 0) return 'default';
+  if (profiles[requestedProfile]) {
+    return requestedProfile;
+  }
+  return keys[0];
+}
+
+function loadConfig() {
+  try {
+    const full = readJson(CONFIG_FILE, {});
+    let rawFb = full.fbCrawlerConfig || { adminIds: [], notifyConversationId: '', notifyIsGroup: false, rules: { requireKeywords: [], blockKeywords: [], locations: {}, extractRegex: {} }, cronSchedule: [], groups: [] };
+    
+    // Determine primaryAgentId
+    let primaryAgentId = 'banxe';
+    let agentIds = [];
+    try {
+      const mainCfg = readJson(path.join(openclawHome, 'openclaw.json'), {});
+      const agents = mainCfg.agents?.list || [];
+      agentIds = agents.map(a => a.id).filter(Boolean);
+      if (agentIds.length > 0) {
+        primaryAgentId = agentIds[0];
+      }
+    } catch (err) {}
+
+    // 1. Migrate root keys to profiles object if profiles doesn't exist
+    if (!rawFb.profiles) {
+      rawFb = {
+        adminIds: rawFb.adminIds || [],
+        notifyConversationId: rawFb.notifyConversationId || '',
+        notifyIsGroup: rawFb.notifyIsGroup || false,
+        profiles: {
+          [primaryAgentId]: {
+            enabled: true,
+            groups: rawFb.groups || [],
+            rules: rawFb.rules || { requireKeywords: [], blockKeywords: [], locations: {}, extractRegex: {} },
+            cronSchedule: rawFb.cronSchedule || []
+          }
+        }
+      };
+      
+      // Explicitly enable AI for the migrated profile (which was banxe/root)
+      rawFb.profiles[primaryAgentId].rules.useAi = true;
+      
+      // Save migrated config
+      full.fbCrawlerConfig = rawFb;
+      writeJson(CONFIG_FILE, full);
+    } else {
+      // 2. If profiles exist but banxe profile needs renaming to primaryAgentId
+      if (rawFb.profiles.banxe && primaryAgentId !== 'banxe') {
+        rawFb.profiles[primaryAgentId] = rawFb.profiles.banxe;
+        delete rawFb.profiles.banxe;
+        full.fbCrawlerConfig = rawFb;
+        writeJson(CONFIG_FILE, full);
+      }
+    }
+
+    // 3. Make sure all active agentIds have a profile initialized
+    let changed = false;
+    for (const aId of agentIds) {
+      if (!rawFb.profiles[aId]) {
+        rawFb.profiles[aId] = {
+          enabled: true,
+          groups: [],
+          rules: { requireKeywords: [], blockKeywords: [], locations: {}, extractRegex: {} },
+          cronSchedule: []
+        };
+        changed = true;
+      }
+    }
+    if (changed) {
+      full.fbCrawlerConfig = rawFb;
+      writeJson(CONFIG_FILE, full);
+    }
+
+    return rawFb;
+  } catch (e) {
+    console.error('[fb-crawler] loadConfig err:', e);
+    return { adminIds: [], profiles: {} };
+  }
+}
+
+function saveConfig(cfg) {
+  try {
+    const full = readJson(CONFIG_FILE, {});
+    full.fbCrawlerConfig = cfg;
+    writeJson(CONFIG_FILE, full);
+  } catch (e) {
+    console.error('[fb-crawler] saveConfig failed:', e);
+  }
+}
 function loadState(profile)     { return readJson(path.join(DATA_DIR, `state_${profile}.json`), { lastRun: null, scanned: [], authorPostCount: {} }); }
 function saveState(profile, s)    { writeJson(path.join(DATA_DIR, `state_${profile}.json`), s); }
 function loadBlacklist(profile) { return readJson(path.join(DATA_DIR, `blacklist_${profile}.json`), { uids: [] }); }
@@ -79,19 +204,109 @@ function appendResult(profile, item) {
 }
 
 // ─── sendMsg utility ──────────────────────────────────────────────────────────
-async function sendMsg(ctx, convId, isGroup, text) {
-  const paths = [
-    pathToFileURL(path.join(openclawHome, 'npm/node_modules/@openclaw/zalouser/dist/test-api.js')).href,
-    'file:///usr/local/lib/node_modules/openclaw/dist/extensions/zalouser/test-api.js',
-    'openclaw/dist/extensions/zalouser/test-api.js'
-  ];
-  let send;
-  for (const p of paths) {
-    try { const m = await import(p); if (m?.sendMessageZalouser) { send = m.sendMessageZalouser; break; } } catch {}
+// ─── Zalouser send API — dynamic path resolution ──────────
+let _cachedZaloApiModule = null;
+
+async function resolveZaloApiModule() {
+  if (_cachedZaloApiModule) return _cachedZaloApiModule;
+
+  const baseDirs = [openclawHome];
+  const parentDir = path.dirname(openclawHome);
+  if (parentDir && parentDir !== '/' && parentDir !== '.') {
+    baseDirs.push(parentDir);
   }
-  if (!send) { console.error('[fb-crawler] sendMsg: API not found'); return; }
-  const tid = String(convId).replace(/^group:/, '');
-  await send(tid, String(text), { isGroup, profile: ctx?.accountId || 'default', textMode: 'markdown' });
+
+  const candidates = [];
+  for (const base of baseDirs) {
+    candidates.push(
+      path.join(base, 'npm/node_modules/@openclaw/zalouser/dist'),
+      path.join(base, 'extensions/zalouser/dist'),
+      path.join(base, 'extensions/zalouser')
+    );
+  }
+  candidates.push(
+    '/usr/local/lib/node_modules/@openclaw/zalouser/dist',
+    '/usr/local/lib/node_modules/openclaw/dist/extensions/zalouser'
+  );
+
+  // Dynamically find npm project workspaces (e.g. openclaw-zalouser-xxxxx)
+  for (const base of baseDirs) {
+    const projectsDir = path.join(base, 'npm', 'projects');
+    if (fs.existsSync(projectsDir)) {
+      try {
+        for (const projectDir of fs.readdirSync(projectsDir)) {
+          const candidateDist = path.join(projectsDir, projectDir, 'node_modules', '@openclaw', 'zalouser', 'dist');
+          if (fs.existsSync(candidateDist)) {
+            candidates.unshift(candidateDist);
+          }
+        }
+      } catch (_) { }
+    }
+  }
+
+  // Find the actual file in candidates
+  const fileCandidates = [];
+  for (const dir of candidates) {
+    if (!fs.existsSync(dir)) continue;
+    try {
+      const files = fs.readdirSync(dir);
+      // 1. Look for channel.runtime-*.js
+      const runtimeFile = files.find(f => f.startsWith('channel.runtime-') && f.endsWith('.js'));
+      if (runtimeFile) {
+        fileCandidates.push(path.join(dir, runtimeFile));
+      }
+      // 2. Look for test-api.js as fallback
+      if (files.includes('test-api.js')) {
+        fileCandidates.push(path.join(dir, 'test-api.js'));
+      }
+    } catch (_) {}
+  }
+
+  for (const p of fileCandidates) {
+    try {
+      const url = p.startsWith('/') ? `file://${p}` : `file:///${p.replace(/\\/g, '/')}`;
+      const mod = await import(url);
+      if (mod && (mod.sendMessageZalouser || mod.listZaloGroupMembers)) {
+        console.log(`[fb-crawler] zalouser API loaded successfully from: ${p}`);
+        _cachedZaloApiModule = mod;
+        return mod;
+      }
+    } catch (e) {
+      // Try next
+    }
+  }
+
+  return null;
+}
+
+// ─── sendMsg utility ──────────────────────────────────────────────────────────
+async function sendMsg(ctx, convId, isGroup, text) {
+  try {
+    const api = await resolveZaloApiModule();
+    if (!api?.sendMessageZalouser) {
+      console.error('[fb-crawler] sendMsg: Zalo User API not found');
+      return;
+    }
+    const profile = ctx?.accountId || 'default';
+    
+    // Support multiple targets separated by commas
+    const targets = String(convId).split(',').map(t => t.trim()).filter(Boolean);
+    for (const target of targets) {
+      const isTargetGroup = target.startsWith('group:') || isGroup;
+      const tid = target.replace(/^group:/, '');
+      await api.sendMessageZalouser(tid, String(text), {
+        isGroup: isTargetGroup,
+        profile,
+        textMode: 'markdown'
+      }).catch(err => {
+        console.error(`[fb-crawler] Failed to send report to target ${target}: ${err.message}`);
+      });
+      // 1s delay between targets to prevent rate limiting
+      await new Promise(r => setTimeout(r, 1000));
+    }
+  } catch (err) {
+    console.error(`[fb-crawler] sendMsg exception: ${err.message}`);
+  }
 }
 
 // ─── Time helper: detect if a post time string is older than current month ─────
@@ -153,26 +368,49 @@ function extractRegexFields(text, regexObj) {
 }
 
 // ─── AI Classifier ────────────────────────────────────────────────────────────
-async function analyzePostAI(text) {
+function get9RouterApiKey() {
   try {
+    const mainCfg = readJson(path.join(openclawHome, 'openclaw.json'), {});
+    const p9 = mainCfg.models?.providers?.['9router'];
+    if (p9?.apiKey) {
+      return p9.apiKey;
+    }
+  } catch (e) {
+    console.error('[fb-crawler] Failed to read 9router apiKey from openclaw.json:', e.message);
+  }
+  return 'sk-no-key'; // fallback
+}
+
+async function analyzePostAI(text, rules = {}) {
+  try {
+    let targetProduct = "";
+    if (rules.aiProductDesc && rules.aiProductDesc.trim()) {
+      targetProduct = rules.aiProductDesc.trim();
+    } else if (rules.requireKeywords && rules.requireKeywords.length > 0) {
+      targetProduct = rules.requireKeywords.join(', ');
+    } else {
+      targetProduct = "xe máy hoặc robot hút bụi / sản phẩm công nghệ";
+    }
+
+    const apiKey = get9RouterApiKey();
     const res = await fetch('http://9router:20128/v1/chat/completions', {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer sk-no-key' },
+      headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${apiKey}` },
       body: JSON.stringify({
         model: 'smart-route',
         messages: [
           {
             role: 'system',
-            content: `Bạn là AI kiểm duyệt bài đăng bán xe máy. Nhiệm vụ của bạn là đọc bài viết và xác định đây có phải bài "Cá nhân đăng bán thanh lý xe máy" HỢP LỆ không.
+            content: `Bạn là AI kiểm duyệt bài đăng bán hàng/thanh lý. Nhiệm vụ của bạn là đọc bài viết và xác định đây có phải bài "Cá nhân đăng bán thanh lý hoặc tìm mua liên quan đến: ${targetProduct}" HỢP LỆ không.
 HỢP LỆ (trả về YES):
-- Cá nhân rao bán chiếc xe máy nguyên chiếc của họ (thanh lý, pass lại, kẹt tiền bán...).
+- Cá nhân rao bán hoặc thanh lý chiếc máy/sản phẩm của họ liên quan đến: ${targetProduct} (thanh lý, pass lại, kẹt tiền bán...).
+- Cá nhân đăng tìm mua, cần tư vấn mua chiếc máy/sản phẩm liên quan đến: ${targetProduct}.
 
 KHÔNG HỢP LỆ (trả về NO):
-- Bài bán mắt kính, bất động sản, quần áo, dịch vụ hớt tóc, v.v.
-- Hỏi đáp, thảo luận, khoe xe (ví dụ: "thay phuộc loại nào", "xe đẹp quá").
-- Mua bán phụ tùng, đồ chơi xe (mâm, lốp, phuộc, chuông nồi...).
-- Bài đăng tìm mua xe.
-- Cửa hàng (salon) chuyên nghiệp bán nhiều xe, hỗ trợ trả góp, bao nợ xấu.
+- Bài bán các mặt hàng khác không liên quan.
+- Bài hỏi đáp, thảo luận chung không có nhu cầu mua/bán (ví dụ: "app này dùng thế nào", "máy đẹp quá").
+- Mua bán linh kiện, phụ kiện lẻ (ví dụ: giẻ lau, chổi quét, nước lau sàn, sạc, hoặc phụ tùng lẻ) không phải cả máy nguyên chiếc.
+- Cửa hàng chuyên nghiệp kinh doanh nhiều máy (bán số lượng lớn, hỗ trợ trả góp, bao nợ xấu...).
 
 LƯU Ý: Nếu nghi ngờ, hãy ưu tiên trả về NO. CHỈ TRẢ LỜI ĐÚNG 1 TỪ: "YES" hoặc "NO".`
           },
@@ -222,8 +460,19 @@ LƯU Ý: Nếu nghi ngờ, hãy ưu tiên trả về NO. CHỈ TRẢ LỜI ĐÚN
 
 
 // ─── Core crawl logic ─────────────────────────────────────────────────────────
+let isCrawlRunning = false;
+
 async function runCrawlSession(sessionId, groupSlice, sendReport, api, groupsOverride = null, profile = 'banxe') {
-  const allCfg = loadConfig();
+  if (isCrawlRunning) {
+    console.log(`[fb-crawler] Session ${sessionId} (${profile}) skipped: another crawl is in progress.`);
+    if (sendReport) {
+      await sendReport(`⚠️ Hệ thống đang bận xử lý một phiên quét khác. Vui lòng đợi phiên quét trước hoàn tất rồi thử lại.`);
+    }
+    return;
+  }
+  isCrawlRunning = true;
+  try {
+    const allCfg = loadConfig();
   const cfg   = allCfg.profiles?.[profile] || { rules: {}, groups: [] };
   const state = loadState(profile);
   const bl    = loadBlacklist(profile);
@@ -253,7 +502,8 @@ async function runCrawlSession(sessionId, groupSlice, sendReport, api, groupsOve
 
   async function btExec(cmd) {
     try {
-      const { stdout } = await execAsync(`node /root/project/.openclaw/workspace-bot/browser-tool.js ${cmd}`);
+      const browserToolPath = path.join(openclawHome, 'workspace-bot', 'browser-tool.js');
+      const { stdout } = await execAsync(`node "${browserToolPath}" ${cmd}`);
       return stdout || '';
     } catch(e) {
       console.error('[fb-crawler] btExec err:', e.message);
@@ -263,6 +513,12 @@ async function runCrawlSession(sessionId, groupSlice, sendReport, api, groupsOve
 
   let foundTotal = 0, skippedPro = 0, skippedLoc = 0;
   const foundItems = [];
+
+  const cookiesPath = path.join(openclawHome, 'plugins-data', 'zalo-mod', 'fb-cookies.json');
+  if (fs.existsSync(cookiesPath)) {
+    console.log(`[fb-crawler] Applying saved Facebook cookies from: ${cookiesPath}`);
+    await btExec(`set_cookies "${cookiesPath}"`);
+  }
 
   for (const group of groups) {
     try {
@@ -291,8 +547,9 @@ async function runCrawlSession(sessionId, groupSlice, sendReport, api, groupsOve
           if (match) {
             const parsed = JSON.parse(match[0]);
             allPagePosts.push(...parsed);
-            // Stop if ANY post in this batch is older than current month
-            if (parsed.some(p => isOlderThanCurrentMonth(p.time))) {
+            // Stop if ANY post in this batch is older than current month (ignore first 2 posts to skip pinned announcements)
+            const checkPosts = parsed.slice(2);
+            if (checkPosts.some(p => isOlderThanCurrentMonth(p.time))) {
               reachedOldPosts = true;
               console.log(`[fb-crawler] ${group.key}: reached end of current month at scroll ${scroll}`);
             }
@@ -362,8 +619,8 @@ async function runCrawlSession(sessionId, groupSlice, sendReport, api, groupsOve
           continue; // Post doesn't mention any of the target vehicle models
         }
 
-        // For banxe profile, use AI to classify instead of strict keywords
-        if (profile === 'banxe') {
+        const useAi = rules.useAi !== false;
+        if (useAi) {
           // Block check (still useful for hard blocks like "cửa hàng", "salon", "trả góp")
           if (blockKeywords.length > 0 && textContainsAny(text, blockKeywords)) {
             skippedPro++;
@@ -372,13 +629,12 @@ async function runCrawlSession(sessionId, groupSlice, sendReport, api, groupsOve
           }
 
           // Use AI to read and classify
-          const isPersonalSale = await analyzePostAI(text);
+          const isPersonalSale = await analyzePostAI(text, rules);
           if (!isPersonalSale) {
             skippedPro++;
             continue;
           }
         } else {
-          // For other profiles (matkinh), keep keyword logic
           // Requirement check
           if (requireKeywords.length > 0 && !textContainsAny(text, requireKeywords)) {
             continue;
@@ -470,15 +726,59 @@ async function runCrawlSession(sessionId, groupSlice, sendReport, api, groupsOve
   let reportStr = `🔍 *Session ${sessionId} (${profile}) hoàn tất*\n✅ Tìm được: ${foundTotal} bài\n🚫 Bị block/Sai mục đích: ${skippedPro}\n📍 Sai vùng: ${skippedLoc}`;
   
   if (foundItems.length > 0) {
-    reportStr = buildSessionReport(foundItems, sessionId) + `\n\n` + reportStr;
+    reportStr = buildSessionReport(foundItems, sessionId, { skippedPro, skippedLoc }) + `\n\n` + reportStr;
   } else {
     reportStr = `📋 *KẾT QUẢ SESSION ${sessionId}*\n\nKhông có bài viết hợp lệ nào mới.\n\n` + reportStr;
   }
 
   if (sendReport) await sendReport(reportStr);
+  } finally {
+    isCrawlRunning = false;
+  }
 }
 
-function buildSessionReport(items, sessionId) {
+// ─── Report template helper ───────────────────────────────────────────────────
+const REPORT_TEMPLATE_FILE = path.join(openclawHome, 'plugins-data', 'fb-crawler', 'report-template.txt');
+
+function loadReportTemplate() {
+  try {
+    if (fs.existsSync(REPORT_TEMPLATE_FILE)) {
+      return fs.readFileSync(REPORT_TEMPLATE_FILE, 'utf8');
+    }
+  } catch (_) {}
+  return null; // null = use default
+}
+
+function buildSessionReport(items, sessionId, extraStats = {}) {
+  const template = loadReportTemplate();
+
+  if (template) {
+    // Use custom template
+    const itemTemplate = `🏍️ *{groupName}*\n👤 {uid}\n📍 Khu vực: {location}\n{extracted}📝 {snippet}...\n🔗 {permalink}`;
+    const top = items.slice(-10).map(i => {
+      let extracted = '';
+      for (const [k, v] of Object.entries(i.extracted || {})) {
+        if (v) extracted += `• ${k.toUpperCase()}: ${v}\n`;
+      }
+      const snippet = (i.text || '').split('\n')[0].substring(0, 100).trim();
+      return itemTemplate
+        .replace('{groupName}', i.name || '')
+        .replace('{uid}', i.uid || 'N/A')
+        .replace('{location}', i.location || '')
+        .replace('{extracted}', extracted)
+        .replace('{snippet}', snippet)
+        .replace('{permalink}', i.permalink || '');
+    }).join('\n\n━━━━━━━━━━━━━━\n\n');
+
+    return template
+      .replace('{sessionId}', sessionId)
+      .replace('{totalFound}', String(items.length))
+      .replace('{skippedPro}', String(extraStats.skippedPro || 0))
+      .replace('{skippedLoc}', String(extraStats.skippedLoc || 0))
+      .replace('{items}', top);
+  }
+
+  // Default (original) format
   const top = items.slice(-10).map(i => {
     let extra = '';
     for(const [k, v] of Object.entries(i.extracted || {})) {
@@ -489,6 +789,7 @@ function buildSessionReport(items, sessionId) {
   }).join('\n\n━━━━━━━━━━━━━━\n\n');
   return `📋 *BÁO CÁO SESSION ${sessionId}*\n\n✅ TÌM THẤY: ${items.length} BÀI ĐĂNG BÁN MỚI\n\n${top}\n\n👉 Gõ /report để xem toàn bộ báo cáo trong ngày.`;
 }
+
 
 // ─── Plugin Entry ─────────────────────────────────────────────────────────────
 const plugin = definePluginEntry({
@@ -534,7 +835,7 @@ const plugin = definePluginEntry({
       const cmd   = parts[0].toLowerCase();
 
       // Extract profile
-      let profile = 'banxe';
+      let profile = getProfileFromCtx(ctx);
       let cmdArgs = parts.slice(1);
       const profiles = plugCfg.profiles || {};
       const knownProfiles = Object.keys(profiles);
@@ -542,6 +843,7 @@ const plugin = definePluginEntry({
          profile = cmdArgs[0].toLowerCase();
          cmdArgs = cmdArgs.slice(1);
       }
+      profile = resolveActiveProfile(profiles, profile);
       const pCfg = profiles[profile] || { groups: [], rules: {} };
 
       const reply = (text) => sendMsg(ctx, rawConvId, isGroupMsg, text);
@@ -780,6 +1082,13 @@ const plugin = definePluginEntry({
                   return;
                 }
 
+                const currentConfig = loadConfig();
+                const liveSess = (currentConfig.profiles?.[profileName]?.cronSchedule || []).find(s => s.id === sess.id);
+                if (liveSess && liveSess.enabled === false) {
+                  console.log(`[fb-crawler] Scheduled run skipped: session ${sess.id} is disabled in config.`);
+                  return;
+                }
+
                 activeCronRun = jobName;
                 const startedAt = Date.now();
                 appendCronLog({ job: jobName, status: 'started', cron: sess.cron, groupSlice: sess.groupSlice || null });
@@ -790,18 +1099,7 @@ const plugin = definePluginEntry({
                   let reportTo = null;
                   if (cid) {
                     reportTo = async (text) => {
-                      const paths = [
-                        pathToFileURL(path.join(openclawHome, 'npm/node_modules/@openclaw/zalouser/dist/test-api.js')).href,
-                        'file:///usr/local/lib/node_modules/openclaw/dist/extensions/zalouser/test-api.js',
-                      ];
-                      let send;
-                      for (const p of paths) {
-                        try { const m = await import(p); if (m?.sendMessageZalouser) { send = m.sendMessageZalouser; break; } } catch {}
-                      }
-                      if (send) {
-                        const tid = String(cid).replace(/^group:/, '');
-                        await send(tid, text, { isGroup: ig, textMode: 'markdown' });
-                      }
+                      await sendMsg({ accountId: 'default' }, cid, ig, text);
                     };
                   }
                   await runCrawlSession(sess.id, sess.groupSlice, reportTo, api, null, profileName);
@@ -842,6 +1140,22 @@ const plugin = definePluginEntry({
       console.warn('[fb-crawler] api.registerService not available; cron service disabled.');
       appendCronLog({ status: 'service-unavailable', reason: 'api.registerService missing' });
     }
+
+    globalThis.__runFbCrawlerSession = async (sessionId, groupSlice, profile = 'banxe') => {
+      const notifyCfg = loadConfig();
+      const profiles = notifyCfg.profiles || {};
+      profile = resolveActiveProfile(profiles, profile);
+      const profileCfg = profiles[profile] || {};
+      const cid = profileCfg.notifyConversationId || notifyCfg.notifyConversationId;
+      const ig  = profileCfg.notifyIsGroup ?? notifyCfg.notifyIsGroup ?? false;
+      let reportTo = null;
+      if (cid) {
+        reportTo = async (text) => {
+          await sendMsg({ accountId: 'default' }, cid, ig, text);
+        };
+      }
+      await runCrawlSession(sessionId, groupSlice, reportTo, api, null, profile);
+    };
   },
 });
 

@@ -2,7 +2,23 @@
 
 All notable changes to this project will be documented in this file.
 
+## [1.0.9] - 2026-06-13
+
+### Added
+- **Global crawl session trigger**: Đăng ký hàm chạy crawl toàn cục `globalThis.__runFbCrawlerSession` cho phép gọi trực tiếp từ plugin zalo-mod.
+- **Custom report template**: Hỗ trợ định dạng báo cáo tùy chỉnh thông qua tệp `report-template.txt`.
+- **Flexible AI check**: Cấu hình thuộc tính `useAi` linh hoạt thay vì hardcode cho profile `banxe`.
+
+### Changed
+- **Unified messaging handler**: Cập nhật cơ chế gửi tin nhắn báo cáo `sendMsg` sử dụng API của Zalo mà không phụ thuộc trực tiếp vào tệp `test-api.js` của zalouser.
+
+## [1.0.8] - 2026-06-05
+
+### Fixed
+- **Tối ưu hóa chạy cron**: Ổn định các tác vụ chạy định kỳ và ngăn chặn nghẽn vòng lặp sự kiện (event-loop starvation).
+
 ## [1.0.7] - 2026-05-08
+
 
 ### Fixed
 - Bumped version to resolve ClawHub duplicate version conflict on publish.
