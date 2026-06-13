@@ -11,7 +11,22 @@ const execAsync = promisify(exec);
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
-const openclawHome = path.resolve(__dirname, '..', '..');
+
+let resolvedHome = __dirname;
+while (true) {
+  if (fs.existsSync(path.join(resolvedHome, 'openclaw.json'))) {
+    break;
+  }
+  const parent = path.dirname(resolvedHome);
+  if (parent === resolvedHome) {
+    // Dự phòng cấu hình mặc định nếu không tìm thấy
+    resolvedHome = path.resolve(__dirname, '..', '..');
+    break;
+  }
+  resolvedHome = parent;
+}
+const openclawHome = resolvedHome;
+
 
 // ─── Paths ────────────────────────────────────────────────────────────────────
 const DATA_DIR     = path.join(openclawHome, 'plugins-data', 'fb-crawler');
@@ -27,28 +42,6 @@ const CRON_TIMEZONE = 'Asia/Ho_Chi_Minh';
 for (const d of [DATA_DIR, RESULTS_DIR, RAW_DIR, CONTENT_DIR]) {
   if (!fs.existsSync(d)) fs.mkdirSync(d, { recursive: true });
 }
-
-// ── Auto-fix 777 permissions (Windows bind-mount issue) ──────────────────────
-// OpenClaw gateway blocks world-writable plugins. Windows bind-mounts give 0777.
-// Fix recursively using pure Node.js fs — safe, no child_process needed.
-(function fixPluginPermissions(dir, depth) {
-  if (depth > 4) return; // max 4 levels deep
-  try {
-    fs.chmodSync(dir, 0o755);
-    for (const entry of fs.readdirSync(dir)) {
-      if (entry === 'node_modules' || entry === '.git') continue;
-      try {
-        const full = path.join(dir, entry);
-        const st = fs.statSync(full);
-        if (st.isDirectory()) {
-          fixPluginPermissions(full, depth + 1);
-        } else {
-          fs.chmodSync(full, 0o644);
-        }
-      } catch (_) { /* non-blocking */ }
-    }
-  } catch (_) { /* non-blocking — ok on Windows */ }
-})(__dirname, 0);
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 function readJson(file, def = {}) {
@@ -155,9 +148,11 @@ function loadConfig() {
       }
     }
 
-    // 3. Make sure all active agentIds have a profile initialized
+    // 3. Đảm bảo tất cả agentIds và Zalo bot profile IDs đều được khởi tạo profile
     let changed = false;
-    for (const aId of agentIds) {
+    const extraProfileIds = Object.keys(full.bots || {});
+    const allProfileIds = [...new Set([...agentIds, ...extraProfileIds])];
+    for (const aId of allProfileIds) {
       if (!rawFb.profiles[aId]) {
         rawFb.profiles[aId] = {
           enabled: true,
@@ -188,6 +183,13 @@ function saveConfig(cfg) {
   } catch (e) {
     console.error('[fb-crawler] saveConfig failed:', e);
   }
+}
+
+// Chủ động khởi tạo/migrate cấu hình khi nạp module
+try {
+  loadConfig();
+} catch (e) {
+  console.error('[fb-crawler] Chủ động loadConfig thất bại khi khởi động:', e.message);
 }
 function loadState(profile)     { return readJson(path.join(DATA_DIR, `state_${profile}.json`), { lastRun: null, scanned: [], authorPostCount: {} }); }
 function saveState(profile, s)    { writeJson(path.join(DATA_DIR, `state_${profile}.json`), s); }

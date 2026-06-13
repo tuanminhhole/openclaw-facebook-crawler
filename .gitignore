@@ -1,4 +1,4 @@
-﻿node_modules/
+node_modules/
 data/
 *.log
 .DS_Store
@@ -7,3 +7,4 @@ data/
 # Exclude AI Agent and internal docs from git tracking
 .agent/
 docs/
+config.json

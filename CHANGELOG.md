@@ -2,6 +2,11 @@
 
 All notable changes to this project will be documented in this file.
 
+## [1.0.10] - 2026-06-13
+
+### Fixed
+- **Profile config loading**: Fix profile config loading logic to dynamically scan for openclaw.json instead of hardcoding paths.
+
 ## [1.0.9] - 2026-06-13
 
 ### Added
