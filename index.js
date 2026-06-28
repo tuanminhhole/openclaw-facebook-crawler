@@ -728,7 +728,7 @@ async function runCrawlSession(sessionId, groupSlice, sendReport, api, groupsOve
   let reportStr = `🔍 *Session ${sessionId} (${profile}) hoàn tất*\n✅ Tìm được: ${foundTotal} bài\n🚫 Bị block/Sai mục đích: ${skippedPro}\n📍 Sai vùng: ${skippedLoc}`;
   
   if (foundItems.length > 0) {
-    reportStr = buildSessionReport(foundItems, sessionId, { skippedPro, skippedLoc }) + `\n\n` + reportStr;
+    reportStr = buildSessionReport(foundItems, sessionId, { skippedPro, skippedLoc }, profile) + `\n\n` + reportStr;
   } else {
     reportStr = `📋 *KẾT QUẢ SESSION ${sessionId}*\n\nKhông có bài viết hợp lệ nào mới.\n\n` + reportStr;
   }
@@ -742,8 +742,15 @@ async function runCrawlSession(sessionId, groupSlice, sendReport, api, groupsOve
 // ─── Report template helper ───────────────────────────────────────────────────
 const REPORT_TEMPLATE_FILE = path.join(openclawHome, 'plugins-data', 'fb-crawler', 'report-template.txt');
 
-function loadReportTemplate() {
+function loadReportTemplate(profile) {
   try {
+    if (profile) {
+      const pFile = path.join(openclawHome, 'plugins-data', 'zalo-mod', `report-template-${profile}.txt`);
+      if (fs.existsSync(pFile)) return fs.readFileSync(pFile, 'utf8');
+    }
+    const gFile = path.join(openclawHome, 'plugins-data', 'zalo-mod', 'report-template.txt');
+    if (fs.existsSync(gFile)) return fs.readFileSync(gFile, 'utf8');
+
     if (fs.existsSync(REPORT_TEMPLATE_FILE)) {
       return fs.readFileSync(REPORT_TEMPLATE_FILE, 'utf8');
     }
@@ -751,12 +758,28 @@ function loadReportTemplate() {
   return null; // null = use default
 }
 
-function buildSessionReport(items, sessionId, extraStats = {}) {
-  const template = loadReportTemplate();
+function loadItemTemplate(profile) {
+  try {
+    if (profile) {
+      const pFile = path.join(openclawHome, 'plugins-data', 'zalo-mod', `item-template-${profile}.txt`);
+      if (fs.existsSync(pFile)) return fs.readFileSync(pFile, 'utf8');
+    }
+    const gFile = path.join(openclawHome, 'plugins-data', 'zalo-mod', 'item-template.txt');
+    if (fs.existsSync(gFile)) return fs.readFileSync(gFile, 'utf8');
+
+    const legacyItemFile = path.join(openclawHome, 'plugins-data', 'fb-crawler', 'item-template.txt');
+    if (fs.existsSync(legacyItemFile)) return fs.readFileSync(legacyItemFile, 'utf8');
+  } catch (_) {}
+  return null; // null = use default
+}
+
+function buildSessionReport(items, sessionId, extraStats = {}, profile = 'banxe') {
+  const template = loadReportTemplate(profile);
+  const customItemTemplate = loadItemTemplate(profile);
+  const itemTemplate = customItemTemplate || `🏍️ *{groupName}*\n👤 {uid}\n📍 Khu vực: {location}\n{extracted}📝 {snippet}...\n🔗 {permalink}`;
 
   if (template) {
     // Use custom template
-    const itemTemplate = `🏍️ *{groupName}*\n👤 {uid}\n📍 Khu vực: {location}\n{extracted}📝 {snippet}...\n🔗 {permalink}`;
     const top = items.slice(-10).map(i => {
       let extracted = '';
       for (const [k, v] of Object.entries(i.extracted || {})) {
@@ -764,20 +787,20 @@ function buildSessionReport(items, sessionId, extraStats = {}) {
       }
       const snippet = (i.text || '').split('\n')[0].substring(0, 100).trim();
       return itemTemplate
-        .replace('{groupName}', i.name || '')
-        .replace('{uid}', i.uid || 'N/A')
-        .replace('{location}', i.location || '')
-        .replace('{extracted}', extracted)
-        .replace('{snippet}', snippet)
-        .replace('{permalink}', i.permalink || '');
+        .replace(/{groupName}/g, i.name || '')
+        .replace(/{uid}/g, i.uid || 'N/A')
+        .replace(/{location}/g, i.location || '')
+        .replace(/{extracted}/g, extracted)
+        .replace(/{snippet}/g, snippet)
+        .replace(/{permalink}/g, i.permalink || '');
     }).join('\n\n━━━━━━━━━━━━━━\n\n');
 
     return template
-      .replace('{sessionId}', sessionId)
-      .replace('{totalFound}', String(items.length))
-      .replace('{skippedPro}', String(extraStats.skippedPro || 0))
-      .replace('{skippedLoc}', String(extraStats.skippedLoc || 0))
-      .replace('{items}', top);
+      .replace(/{sessionId}/g, sessionId)
+      .replace(/{totalFound}/g, String(items.length))
+      .replace(/{skippedPro}/g, String(extraStats.skippedPro || 0))
+      .replace(/{skippedLoc}/g, String(extraStats.skippedLoc || 0))
+      .replace(/{items}/g, top);
   }
 
   // Default (original) format
@@ -787,7 +810,13 @@ function buildSessionReport(items, sessionId, extraStats = {}) {
       if(v) extra += `• ${k.toUpperCase()}: ${v}\n`;
     }
     const snippet = (i.text || '').split('\n')[0].substring(0, 100).trim();
-    return `🏍️ *${i.name}*\n👤 ${i.uid || 'N/A'}\n📍 Khu vực: ${i.location}\n${extra}📝 ${snippet}...\n🔗 ${i.permalink}`;
+    return itemTemplate
+      .replace(/{groupName}/g, i.name || '')
+      .replace(/{uid}/g, i.uid || 'N/A')
+      .replace(/{location}/g, i.location || '')
+      .replace(/{extracted}/g, extra)
+      .replace(/{snippet}/g, snippet)
+      .replace(/{permalink}/g, i.permalink || '');
   }).join('\n\n━━━━━━━━━━━━━━\n\n');
   return `📋 *BÁO CÁO SESSION ${sessionId}*\n\n✅ TÌM THẤY: ${items.length} BÀI ĐĂNG BÁN MỚI\n\n${top}\n\n👉 Gõ /report để xem toàn bộ báo cáo trong ngày.`;
 }
